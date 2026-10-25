@@ -991,7 +991,7 @@ mod tests {
         a.session.execute("solid.box", &serde_json::json!({"length": 10, "width": 12, "height": 14})).unwrap();
         a.session.selection = vec![solidcraft_engine::Sel::Body { name: "Body1".into() }];
         a.cam.distance = 123.0;
-        a.ui.hidden_profiles = vec![7];
+        a.session.visibility.hidden_profiles = vec![7];
         let doc = a.session.doc.clone();
         let undo = a.session.undo.len();
         let cam = a.cam;
@@ -1002,7 +1002,7 @@ mod tests {
         assert_eq!(a.session.undo.len(), undo);
         assert_eq!(a.cam, cam);
         assert_eq!(a.session.selection.len(), 1);
-        assert_eq!(a.ui.hidden_profiles, vec![7]);
+        assert_eq!(a.session.visibility.hidden_profiles, vec![7]);
         super::new_tab(&mut a);
         a.open_path(&path);
         assert_eq!(a.docs.count(), 2);
@@ -1010,7 +1010,7 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&doc, &a.session.doc));
         assert_eq!(a.cam, cam);
         assert_eq!(a.session.selection.len(), 1);
-        assert_eq!(a.ui.hidden_profiles, vec![7]);
+        assert_eq!(a.session.visibility.hidden_profiles, vec![7]);
         assert_eq!(a.session.undo.len(), undo);
         assert!(a.session.is_dirty());
         std::fs::remove_file(&path).unwrap();
