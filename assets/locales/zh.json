@@ -2276,6 +2276,8 @@
   "prefs.render_previous_geometry_budget": "使用先前的渲染预览几何内存预算",
   "prefs.render_previous_geometry_budget_help": "恢复先前的固定几何内存上限（64位桌面为512 MiB，其他平台为128 MiB），替代基于设备的预算。",
   "prefs.reports_saved": "已保存 {n} 份",
+  "prefs.ribbon_click_ends_tool": "单击正在运行的工具的按钮将结束该工具",
+  "prefs.ribbon_click_ends_tool_note": "单击正在使用的草图工具的高亮功能区按钮会结束该工具，在视图中单击即可再次选择。关闭：单击会重新启动该工具。",
   "prefs.ribbon_reveal": "在功能区中显示搜索结果",
   "prefs.ribbon_reveal_note": "将指针悬停在“搜索命令”的结果上时，会显示该命令在功能区中的位置：其选项卡、按钮或面板下拉菜单中的行。从搜索启动的命令会在那里闪烁，从下拉菜单运行的命令会标记其面板。",
   "prefs.right_click": "右键单击",

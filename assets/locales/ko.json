@@ -1642,6 +1642,8 @@
   "prefs.quality_slowest": "가장 느림",
   "prefs.quality_smoother": "더 부드럽게",
   "prefs.reports_saved": "{n}개 저장됨",
+  "prefs.ribbon_click_ends_tool": "실행 중인 도구의 버튼을 클릭하면 도구 종료",
+  "prefs.ribbon_click_ends_tool_note": "사용 중인 스케치 도구의 강조된 리본 버튼을 클릭하면 도구가 종료되어 뷰에서 클릭하면 다시 선택됩니다. 끄기: 클릭하면 도구가 다시 시작됩니다.",
   "prefs.right_click": "오른쪽 클릭",
   "prefs.saving": "자동 저장 및 복구",
   "prefs.scale_note": "창에서 Ctrl + / Ctrl −로도 조절합니다. 버튼은 100%에서 28 px입니다.",

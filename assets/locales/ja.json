@@ -2276,6 +2276,8 @@
   "prefs.render_previous_geometry_budget": "レンダープレビューで以前のジオメトリ予算を使用",
   "prefs.render_previous_geometry_budget_help": "デバイスに基づく予算の代わりに、以前の固定ジオメトリ上限（64ビットデスクトップでは512 MiB、その他では128 MiB）に戻します。",
   "prefs.reports_saved": "{n} 件保存済み",
+  "prefs.ribbon_click_ends_tool": "実行中のツールのボタンをクリックすると終了する",
+  "prefs.ribbon_click_ends_tool_note": "使用中のスケッチツールの点灯したリボンボタンをクリックするとツールが終了し、ビューのクリックで再び選択できます。オフ: クリックするとツールが最初から開始されます。",
   "prefs.ribbon_reveal": "検索結果をリボンに表示",
   "prefs.ribbon_reveal_note": "コマンド検索で結果にポインターを合わせると、そのコマンドがリボンのどこにあるか（タブ、ボタン、またはパネルのドロップダウン内の行）を表示します。検索から開始したコマンドはそこで点滅し、ドロップダウンから実行中のコマンドはそのパネルに印が付きます。",
   "prefs.right_click": "右クリック",

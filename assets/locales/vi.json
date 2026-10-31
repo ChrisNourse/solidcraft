@@ -2276,6 +2276,8 @@
   "prefs.render_previous_geometry_budget": "Dùng ngân sách hình học trước đây cho bản xem trước kết xuất",
   "prefs.render_previous_geometry_budget_help": "Khôi phục giới hạn hình học cố định trước đây (512 MiB trên máy tính 64 bit, 128 MiB trên các nền tảng khác) thay cho ngân sách dựa trên thiết bị.",
   "prefs.reports_saved": "Đã lưu {n}",
+  "prefs.ribbon_click_ends_tool": "Nhấp vào nút của công cụ đang chạy sẽ kết thúc nó",
+  "prefs.ribbon_click_ends_tool_note": "Nhấp vào nút ruy-băng đang sáng của công cụ phác thảo đang dùng sẽ kết thúc công cụ, để các cú nhấp trong khung nhìn lại chọn đối tượng. Tắt: cú nhấp khởi động lại công cụ.",
   "prefs.ribbon_reveal": "Hiện kết quả tìm kiếm trên ribbon",
   "prefs.ribbon_reveal_note": "Khi rê chuột lên một kết quả trong Tìm lệnh, ribbon cho biết lệnh nằm ở đâu: tab, nút hoặc dòng của nó trong menu thả xuống của một bảng. Lệnh bắt đầu từ tìm kiếm sẽ nhấp nháy ở đó, và lệnh đang chạy từ menu thả xuống sẽ đánh dấu bảng của nó.",
   "prefs.right_click": "Nhấp chuột phải",

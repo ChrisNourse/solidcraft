@@ -2275,6 +2275,8 @@
   "prefs.render_previous_geometry_budget": "Bisheriges Geometriebudget für die Render-Vorschau verwenden",
   "prefs.render_previous_geometry_budget_help": "Stellt die bisherige feste Obergrenze für die Geometrie wieder her (512 MiB auf 64-Bit-Desktop-Systemen, andernfalls 128 MiB) anstelle des geräteabhängigen Budgets.",
   "prefs.reports_saved": "{n} gespeichert",
+  "prefs.ribbon_click_ends_tool": "Klick auf die Schaltfläche des laufenden Werkzeugs beendet es",
+  "prefs.ribbon_click_ends_tool_note": "Ein Klick auf die hervorgehobene Schaltfläche des aktiven Skizzenwerkzeugs beendet das Werkzeug, sodass Klicks in die Ansicht wieder auswählen. Aus: Der Klick startet das Werkzeug neu.",
   "prefs.ribbon_reveal": "Suchergebnisse im Menüband zeigen",
   "prefs.ribbon_reveal_note": "Steht der Zeiger über einem Ergebnis in Befehle suchen, zeigt das Menüband, wo der Befehl liegt: seine Registerkarte, seine Schaltfläche oder seine Zeile im Aufklappmenü eines Panels. Ein aus der Suche gestarteter Befehl blinkt dort, und ein laufender Befehl aus einem Aufklappmenü markiert sein Panel.",
   "prefs.right_click": "Rechtsklick",
