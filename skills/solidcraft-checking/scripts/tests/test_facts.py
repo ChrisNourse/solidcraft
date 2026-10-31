@@ -147,7 +147,7 @@ def test_pattern_counts_run_from_1_to_1000_and_a_range_rule_does_not_stop_0():
         ])
 
 
-def test_a_fractional_count_rounds_to_the_nearest_whole_number():
+def test_a_fractional_count_is_rejected():
     def copies(n):
         return len(execute([
             cmd("parameters.add", name="n", expression=n, unit=""),
@@ -155,7 +155,9 @@ def test_a_fractional_count_rounds_to_the_nearest_whole_number():
             cmd("solid.pattern.rectangular", bodies=["Pin"], dir1=[1, 0, 0], count1="n", spacing1="10 mm"),
         ])["bodies"])
 
-    assert (copies("6.4"), copies("6.5")) == (6, 7)
+    assert copies("6") == 6
+    with pytest.raises(SolidCraftError, match="count must be a whole number"):
+        copies("6.4")
 
 
 HEXAGON = [
@@ -166,9 +168,8 @@ HEXAGON = [
 ]
 
 
-def test_a_circumscribed_polygon_needs_the_polygon_constraint():
-    assert sketch_dof(HEXAGON) == 1
-    assert sketch_dof([*HEXAGON, cmd("sketch.constraint.polygon", lines=[f"l{i}" for i in range(1, 7)])]) == 0
+def test_a_circumscribed_polygon_is_fully_constrained():
+    assert sketch_dof(HEXAGON) == 0
 
 
 def test_round_features_measure_about_1e_4_off():
