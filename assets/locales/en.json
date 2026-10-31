@@ -1911,6 +1911,7 @@
   "nav.hfss.help": "Alt+left drag pans, Shift+Alt+left zooms, Ctrl+left drag on empty space orbits",
   "nav.inventor.help": "Middle drag pans, Shift+middle orbits, Ctrl+middle zooms, right drag orbits",
   "nav.maya.help": "Alt+left drag orbits, Alt+middle pans, Alt+right zooms; middle drag also pans",
+  "nav.nx.help": "Middle drag orbits, Shift+middle pans (NX's middle + right), Ctrl+middle zooms (NX's middle + left); right drag leaves the camera",
   "nav.openscad.help": "Left drag on empty space orbits, Shift+left drag box-selects, sketch geometry drags edit; right or middle drag pans, Shift+right or Shift+middle drag zooms",
   "nav.perspective.sketch": "Sketch editing uses orthographic view. Finish the sketch to switch perspective.",
   "nav.right_drag_orbits.help": "Off: a right drag leaves the camera alone and the right button only opens the context menu. Picking the SolidWorks mouse mapping turns it off.",
