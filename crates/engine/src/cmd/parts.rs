@@ -884,22 +884,22 @@ fn shape_with(family: &str, size: &str, length: Option<f64>, o: &Options) -> std
         o => return Err(format!("unknown part family `{o}` (parts.library lists them)")),
     };
     // A modelled thread is cut turn by turn: refuse one too long to cut in reasonable time.
-    if o.thread == ThreadMode::Modeled
-        && let Some((d, pitch, threaded)) = match sh {
-            Shape::Screw { d, pitch: Some(p), len, head, .. } => {
-                let shank = if let Head::Countersunk { k, .. } = head { len - k } else { len };
-                Some((d, p, thread_length(family, d, p, shank).unwrap_or(shank)))
-            }
-            Shape::Rod { d, pitch: Some(p), len, .. } => Some((d, p, len)),
-            Shape::Nut { d, pitch: Some(p), m, .. } => Some((d, p, m)),
-            _ => None,
+    let cut = match sh {
+        Shape::Screw { d, pitch: Some(p), len, head, .. } => {
+            let shank = if let Head::Countersunk { k, .. } = head { len - k } else { len };
+            Some((p, thread_length(family, d, p, shank).unwrap_or(shank)))
         }
-        && threaded / pitch > MAX_MODELED_TURNS
+        Shape::Rod { pitch: Some(p), len, .. } => Some((p, len)),
+        Shape::Nut { pitch: Some(p), m, .. } => Some((p, m)),
+        _ => None,
+    };
+    if o.thread == ThreadMode::Modeled
+        && let Some((pitch, length)) = cut
+        && length / pitch > MAX_MODELED_TURNS
     {
-        let _ = d;
         return Err(format!(
             "a modelled thread of {:.0} turns takes too long to cut (the limit is {MAX_MODELED_TURNS:.0}): use `thread: cosmetic` for this part, or a length of {} mm or less",
-            threaded / pitch,
+            length / pitch,
             (MAX_MODELED_TURNS * pitch).floor()
         ));
     }
