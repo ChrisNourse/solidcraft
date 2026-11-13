@@ -24,8 +24,22 @@ fn schemas_and_the_key_check_agree() {
     assert_keys(
         input_schema_for::<PartsInsertParams>(),
         &[
-            "at", "clearance", "direction", "drive", "family", "flip", "joint", "left_hand", "length", "name", "pitch", "point", "print_fit", "size",
-            "thread", "tip",
+            "at",
+            "clearance",
+            "direction",
+            "drive",
+            "family",
+            "flip",
+            "joint",
+            "left_hand",
+            "length",
+            "name",
+            "pitch",
+            "point",
+            "print_fit",
+            "size",
+            "thread",
+            "tip",
         ],
     );
     assert_keys(
