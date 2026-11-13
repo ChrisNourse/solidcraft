@@ -45,6 +45,9 @@ pub struct Resize {
     pub size: usize,
     pub length: Option<f64>,
     original_size: usize,
+    /// How the part is made beyond its size: its drive, its thread, a print fit.
+    pub options: crate::dialogs_parts::PartOptions,
+    original_options: crate::dialogs_parts::PartOptions,
     family: Family,
     source: Arc<Document>,
 }
@@ -127,7 +130,17 @@ impl Resize {
             "bearing" => s == part.size.trim(),
             _ => s.eq_ignore_ascii_case(&part.size),
         })?;
-        Some(Self { component, size, original_size: size, length: part.length, family, source: app.session.doc.clone() })
+        let options = crate::dialogs_parts::options_of(&family, part);
+        Some(Self {
+            component,
+            size,
+            original_size: size,
+            length: part.length,
+            original_options: options.clone(),
+            options,
+            family,
+            source: app.session.doc.clone(),
+        })
     }
 
     fn current(&self, app: &SolveApp) -> Result<(), String> {
@@ -192,6 +205,8 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, k: &mut Resize) -> bool {
         choice_row(ui, "Length", "part_resize_length", &mut index, &labels);
         k.length = lengths.get(index).copied();
     }
+    let size_name = k.family.sizes.get(k.size).map_or("", |s| s.0.as_str()).to_string();
+    crate::dialogs_parts::option_rows(ui, &k.family, &size_name, &mut k.options);
     if let Some((size, _)) = k.family.sizes.get(k.size) {
         row(ui, "Configuration", |ui| {
             ui.label(configuration_name(&k.family.id, size, k.length));
@@ -211,7 +226,9 @@ pub fn commands(app: &SolveApp, k: &Resize) -> Result<Vec<(String, Value)>, Stri
         }
         params["length"] = json!(length);
     }
-    if k.size == k.original_size && k.source.parts.get(&k.component).is_some_and(|part| part.length == k.length) {
+    if k.options != k.original_options {
+        crate::dialogs_parts::resize_option_params(&k.family, size, &k.options, &mut params)?;
+    } else if k.size == k.original_size && k.source.parts.get(&k.component).is_some_and(|part| part.length == k.length) {
         return Ok(Vec::new());
     }
     Ok(vec![("parts.resize".into(), params)])

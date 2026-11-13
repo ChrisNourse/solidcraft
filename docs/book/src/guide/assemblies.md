@@ -535,6 +535,45 @@ measuring their union. The same workflow is available through `component.propert
 `occurrence.properties`; see
 [placement and measurement details](https://github.com/tangency-labs/solidcraft/blob/main/docs/assembly-properties.md).
 
+## Standard parts
+
+**Insert Part** (INSERT) adds a screw, bolt, nut, washer, set screw, dowel pin or bearing from
+the standards' tables as a component of its own, built from ordinary features. Pick the unit
+system, the type, the size and the length; the dialog shows a picture of the part and its
+table values. Pick one or more holes and a part is seated in each: its axis on the hole's, its
+head on the face. With no hole it goes to the origin.
+
+A part with a metric thread has more to choose:
+
+| Row | What it does |
+|---|---|
+| Drive type | The recess in the head, where the type comes with several: a socket head cap screw with a hex or hexalobular socket; a pan head or countersunk flat head screw with a cross recess, a hexalobular recess or a slot. The standard in the part number follows. |
+| Point type | A set screw's flat, cone or cup point. |
+| Thread type | **Cosmetic** records the thread on the face and leaves the body a plain cylinder: quick, and enough for drawings and the parts list. **Modeled** cuts the thread into the body, over the standard's thread length from the tip, with the start chamfered: slower to build, and right for a section view, a render or a print. A thread of more than 80 turns is refused; give that part a cosmetic thread. **None** leaves a plain shank. |
+| Thread pitch | Coarse, or a fine pitch of the size (M8 and up). |
+| Left-hand thread | A thread that tightens anticlockwise. |
+| 3D print fit | Makes the part to be printed: a screw's thread and shank are smaller, a nut's thread larger and the drive recess wider, each by the **Clearance per side** (0.15 mm when left empty). Printers differ; print one and adjust the clearance. |
+| Seating joint | Once a hole is picked: how the part is held in it. **Fixed in place** (a rigid joint) is the default. **Turns in place**, **Turns and slides** and **Screws in and out** leave the part its motion about and along the hole, for a mechanism or an animation: a part that screws in travels one pitch for each turn of its joint. **Slides over the face** seats the part on the face and leaves it free to slide, as a screw in a slot. |
+
+The live preview shows the part in place with a cosmetic thread; OK cuts a modeled one.
+
+**Change Part Size** (right-click a standard part) rebuilds the part with another size or
+length, and with any of the choices above changed: a cosmetic thread made modeled before a
+render, a hex socket changed for a hexalobular one. The part's joints keep it seated.
+
+As commands these are `parts.library` (the types, each with its sizes, lengths, `drives`,
+`threads`, `fine_pitches` and `points`), `parts.insert` and `parts.resize`:
+
+```json
+{"family": "socket_head_cap_screw", "size": "M6", "length": 20, "thread": "modeled",
+ "at": [[23.2, 15, 10], [63.2, 15, 10]], "joint": "screw"}
+```
+
+The reply names the component, its `part_number`, an occurrence and a joint for each hole,
+and the part's `extent` along its own Z (`[tip, top of the head]`, the seating plane at 0).
+One insert at several holes makes one component placed once per hole, so a modeled thread is
+cut once however many holes it goes in.
+
 ## Part properties and the bill of materials
 
 A component definition carries its own **part properties**: a part number, a description and a

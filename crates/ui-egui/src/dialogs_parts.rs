@@ -2,7 +2,9 @@
 //! bearings) by family, size and length, with the size's table values and a picture of the part.
 //! Picking a hole (its wall or rim) seats the part in it with a rigid joint, and picking several
 //! seats the same part in each; without one the part goes at the origin. The live preview shows it
-//! placed.
+//! placed. A threaded part also takes its drive, a set screw's point, how its thread is made
+//! (cosmetic, cut into the body or none), a fine pitch, a left-hand thread and a fit for 3D
+//! printing; seated in holes, it takes the joint that holds it there.
 
 use crate::ui_kit::{choice_row, text_row};
 use egui::vec2;
@@ -15,7 +17,7 @@ use crate::selection::{EDGES, FACES, SelInput};
 use solidcraft_theme::Tokens;
 
 /// One family of the library.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Family {
     pub id: String,
     pub name: String,
@@ -25,6 +27,185 @@ pub struct Family {
     /// Size names and their table rows.
     pub sizes: Vec<(String, Value)>,
     pub lengths: Option<Vec<f64>>,
+    /// The drives it comes with, the default first (empty: one drive only).
+    pub drives: Vec<String>,
+    /// It has a metric thread, which the thread options act on.
+    pub threaded: bool,
+    /// The fine pitches (mm) of the sizes that have one.
+    pub fine: std::collections::BTreeMap<String, Vec<f64>>,
+    /// A set screw's points, the default first (empty: none to choose).
+    pub points: Vec<String>,
+}
+
+/// What a part is asked for beyond its size and length, as the lists and boxes of the dialog
+/// hold it: each index is into the list its row shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartOptions {
+    pub drive: usize,
+    pub tip: usize,
+    /// Into [`THREADS`].
+    pub thread: usize,
+    /// 0: coarse; else the size's fine pitch before it.
+    pub pitch: usize,
+    pub left_hand: bool,
+    pub print_fit: bool,
+    /// The print fit's clearance per side as typed (empty: the default).
+    pub clearance: String,
+}
+
+/// How a thread is made: the command's word and the list's label.
+const THREADS: [(&str, &str); 3] = [("cosmetic", "Cosmetic thread"), ("modeled", "Modeled thread"), ("none", "No thread")];
+
+/// The joint a part seated in a hole gets: the command's word and the list's label.
+const JOINTS: [(&str, &str); 5] = [
+    ("rigid", "Fixed in place"),
+    ("revolute", "Turns in place"),
+    ("cylindrical", "Turns and slides"),
+    ("screw", "Screws in and out"),
+    ("planar", "Slides over the face"),
+];
+
+fn drive_label(id: &str) -> &'static str {
+    match id {
+        "hex" => "Hex socket",
+        "hexalobular" => "Hexalobular (six-lobe)",
+        "cross" => "Cross recess",
+        _ => "Slotted",
+    }
+}
+
+fn tip_label(id: &str) -> &'static str {
+    match id {
+        "cone" => "Cone point",
+        "cup" => "Cup point",
+        _ => "Flat point",
+    }
+}
+
+/// The joints a family's parts can be seated with: only a threaded part screws in.
+fn joints(f: &Family) -> Vec<(&'static str, &'static str)> {
+    JOINTS.iter().copied().filter(|j| f.threaded || j.0 != "screw").collect()
+}
+
+/// The rows for a part's options: only those its family and size have.
+pub(crate) fn option_rows(ui: &mut egui::Ui, f: &Family, size: &str, o: &mut PartOptions) {
+    if f.drives.len() > 1 {
+        let labels: Vec<&str> = f.drives.iter().map(|d| drive_label(d)).collect();
+        o.drive = o.drive.min(labels.len() - 1);
+        choice_row(ui, "Drive type", "pt_drive", &mut o.drive, &labels);
+    } else {
+        o.drive = 0;
+    }
+    if f.points.len() > 1 {
+        let labels: Vec<&str> = f.points.iter().map(|t| tip_label(t)).collect();
+        o.tip = o.tip.min(labels.len() - 1);
+        choice_row(ui, "Point type", "pt_tip", &mut o.tip, &labels);
+    } else {
+        o.tip = 0;
+    }
+    if !f.threaded {
+        *o = PartOptions::default();
+        return;
+    }
+    o.thread = o.thread.min(THREADS.len() - 1);
+    choice_row(ui, "Thread type", "pt_thread", &mut o.thread, &THREADS.map(|t| t.1));
+    if o.thread == 1 {
+        ui.vertical(|ui| {
+            crate::ui_kit::text(ui, solidcraft_ui_text::tr("parts.thread.modeled_hint"), crate::ui_kit::Text::Note("parts_modeled"));
+        });
+    }
+    match f.fine.get(size).filter(|fine| !fine.is_empty()) {
+        Some(fine) => {
+            let numbers: Vec<String> = fine.iter().map(|p| format!("{p} mm")).collect();
+            let labels: Vec<&str> = std::iter::once("Coarse pitch").chain(numbers.iter().map(String::as_str)).collect();
+            o.pitch = o.pitch.min(labels.len() - 1);
+            choice_row(ui, "Thread pitch", "pt_pitch", &mut o.pitch, &labels);
+        }
+        None => o.pitch = 0,
+    }
+    if o.thread != 2 && crate::ui_kit::checkbox_row(ui, "pt_left_hand", "Left-hand thread", o.left_hand) {
+        o.left_hand = !o.left_hand;
+    }
+    if crate::ui_kit::checkbox_row(ui, "pt_print_fit", "3D print fit", o.print_fit) {
+        o.print_fit = !o.print_fit;
+    }
+    if o.print_fit {
+        text_row(ui, "Clearance per side", &mut o.clearance, "0.15 mm");
+        ui.vertical(|ui| {
+            crate::ui_kit::text(ui, solidcraft_ui_text::tr("parts.print_fit_hint"), crate::ui_kit::Text::Note("parts_print_fit"));
+        });
+    }
+}
+
+/// The options a part was made with, as the dialog's lists hold them.
+pub(crate) fn options_of(f: &Family, part: &solidcraft_engine::doc::StandardPart) -> PartOptions {
+    let index = |list: &[String], wanted: Option<&str>| wanted.and_then(|w| list.iter().position(|x| x == w)).unwrap_or(0);
+    PartOptions {
+        drive: index(&f.drives, part.drive.as_deref()),
+        tip: index(&f.points, part.point.as_deref()),
+        thread: THREADS.iter().position(|t| Some(t.0) == part.thread.as_deref()).unwrap_or(0),
+        pitch: part.pitch.and_then(|p| f.fine.get(&part.size).and_then(|fine| fine.iter().position(|x| (*x - p).abs() < 1e-9))).map_or(0, |i| i + 1),
+        left_hand: part.left_hand,
+        print_fit: part.print_clearance.is_some(),
+        clearance: part.print_clearance.map(|c| c.to_string()).unwrap_or_default(),
+    }
+}
+
+/// The options as Change Part Size takes them: every one the family has, spelled out, so a
+/// choice put back to its default replaces what the part was made with.
+pub(crate) fn resize_option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) -> Result<(), String> {
+    if f.drives.len() > 1 {
+        p["drive"] = json!(f.drives.get(o.drive));
+    }
+    if f.points.len() > 1 {
+        p["tip"] = json!(f.points.get(o.tip));
+    }
+    if !f.threaded {
+        return Ok(());
+    }
+    p["thread"] = json!(THREADS.get(o.thread).map_or("cosmetic", |t| t.0));
+    p["pitch"] = json!(o.pitch.checked_sub(1).and_then(|i| f.fine.get(size).and_then(|fine| fine.get(i))).copied().unwrap_or(0.0));
+    p["left_hand"] = json!(o.left_hand && o.thread != 2);
+    p["print_fit"] = json!(o.print_fit);
+    let mut typed = json!({});
+    option_params(f, size, &PartOptions { print_fit: o.print_fit, clearance: o.clearance.clone(), ..Default::default() }, &mut typed)?;
+    if let Some(c) = typed.get("clearance") {
+        p["clearance"] = c.clone();
+    }
+    Ok(())
+}
+
+/// The options as the commands take them: only those that are not the default.
+pub(crate) fn option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) -> Result<(), String> {
+    if let Some(d) = f.drives.get(o.drive).filter(|_| o.drive > 0) {
+        p["drive"] = json!(d);
+    }
+    if let Some(t) = f.points.get(o.tip).filter(|_| o.tip > 0) {
+        p["tip"] = json!(t);
+    }
+    if !f.threaded {
+        return Ok(());
+    }
+    if let Some(t) = THREADS.get(o.thread).filter(|_| o.thread > 0) {
+        p["thread"] = json!(t.0);
+    }
+    if let Some(fine) = f.fine.get(size)
+        && let Some(pitch) = o.pitch.checked_sub(1).and_then(|i| fine.get(i))
+    {
+        p["pitch"] = json!(pitch);
+    }
+    if o.left_hand && o.thread != 2 {
+        p["left_hand"] = json!(true);
+    }
+    if o.print_fit {
+        p["print_fit"] = json!(true);
+        let typed = o.clearance.trim().trim_end_matches("mm").trim();
+        if !typed.is_empty() {
+            let c: f64 = typed.replace(',', ".").parse().map_err(|_| "the clearance must be a number in mm".to_string())?;
+            p["clearance"] = json!(c);
+        }
+    }
+    Ok(())
 }
 
 /// The library as `parts.library` gives it.
@@ -48,10 +229,24 @@ pub fn families(v: &Value) -> Vec<Family> {
                 system: f.get("system").and_then(Value::as_str).unwrap_or("metric").to_string(),
                 sizes,
                 lengths: f.get("lengths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()),
+                drives: texts(f.get("drives")),
+                threaded: f.get("threads").is_some_and(Value::is_array),
+                fine: f
+                    .get("fine_pitches")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .map(|(size, pitches)| (size.clone(), pitches.as_array().into_iter().flatten().filter_map(Value::as_f64).collect()))
+                    .collect(),
+                points: texts(f.get("points")),
                 id,
             })
         })
         .collect()
+}
+
+fn texts(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
 }
 
 /// A family's name in the user's language, by its id in the library: the library's own (English)
@@ -67,29 +262,28 @@ pub(crate) fn family_name(f: &Family) -> String {
 /// The Unit system list: each system's id in the library and its label.
 const SYSTEMS: [(&str, &str); 2] = [("metric", "Metric"), ("inch", "Inch")];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Pt {
     pub family: usize,
     pub size: usize,
     /// Index into the family's lengths (none: the default length).
     pub length: Option<usize>,
     pub name: String,
-    /// The (family, size, length) the picture shows (the texture is kept in egui's memory).
-    pub picture: Option<(usize, usize, Option<usize>)>,
+    /// The part the picture shows, as its parameters (the texture is kept in egui's memory).
+    pub picture: Option<String>,
     /// The library, read once.
     pub lib: Option<Vec<Family>>,
+    pub options: PartOptions,
+    /// Into the family's [`joints`]: how a part seated in a hole is held there.
+    pub joint: usize,
 }
 
 /// The dialog for Insert Part.
 pub fn start(_app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     // Standard Parts itself only lists the library: started from the app it opens the dialog
     // that shows it (#8735), which did nothing before.
-    matches!(id, "parts.fastener" | "parts.insert" | "parts.library").then(|| {
-        (
-            Kind::Part(Pt { family: 0, size: 0, length: None, name: String::new(), picture: None, lib: None }),
-            vec![SelInput::new("parts.holes", FACES | EDGES, true)],
-        )
-    })
+    matches!(id, "parts.fastener" | "parts.insert" | "parts.library")
+        .then(|| (Kind::Part(Pt::default()), vec![SelInput::new("parts.holes", FACES | EDGES, true)]))
 }
 
 fn library(app: &mut SolveApp) -> Vec<Family> {
@@ -104,6 +298,7 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
     if let Some(l) = k.length.and_then(|i| f.lengths.as_ref().and_then(|ls| ls.get(i))) {
         p["length"] = json!(l);
     }
+    option_params(f, size, &k.options, &mut p)?;
     let at: Vec<Value> = holes
         .iter()
         .filter_map(|h| match h {
@@ -119,6 +314,11 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
         // One hole keeps the single pick's form.
         1 => p["at"] = at.into_iter().next().unwrap_or(Value::Null),
         _ => p["at"] = Value::Array(at),
+    }
+    if p.get("at").is_some()
+        && let Some(j) = joints(f).get(k.joint).filter(|_| k.joint > 0)
+    {
+        p["joint"] = json!(j.0);
     }
     if !k.name.trim().is_empty() {
         p["name"] = json!(k.name.trim());
@@ -149,6 +349,10 @@ fn picture(p: &Value) -> Option<egui::ColorImage> {
     let mut s = Session::default();
     let mut q = p.clone();
     if let Value::Object(m) = &mut q {
+        // The picture shows the part's shape: a thread cut into it takes seconds and shows little
+        // at this size.
+        m.remove("thread");
+        m.remove("joint");
         m.remove("at");
         m.insert("point".into(), json!([0.0, 0.0, 0.0]));
         m.insert("direction".into(), json!([0.0, 0.0, 1.0]));
@@ -191,6 +395,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
         k.family = first;
         k.size = 0;
         k.length = None;
+        k.options = PartOptions::default();
+        k.joint = 0;
     }
     let shown: Vec<usize> = (0..lib.len()).filter(|i| lib.get(*i).is_some_and(|f| f.system == system_id)).collect();
     let names: Vec<String> = shown
@@ -208,6 +414,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
         k.family = *i;
         k.size = 0;
         k.length = None;
+        k.options = PartOptions::default();
+        k.joint = 0;
     }
     let Some(f) = lib.get(k.family) else { return false };
     let sizes: Vec<&str> = f.sizes.iter().map(|s| s.0.as_str()).collect();
@@ -226,22 +434,36 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
             k.length = Some(i);
         });
     }
+    let size_name = f.sizes.get(k.size).map_or("", |s| s.0.as_str()).to_string();
+    option_rows(ui, f, &size_name, &mut k.options);
+    // How a part seated in a hole is held there: asked once a hole is picked.
+    if inputs.first().is_some_and(|i| !i.items.is_empty()) {
+        let kinds = joints(f);
+        let labels: Vec<&str> = kinds.iter().map(|j| j.1).collect();
+        k.joint = k.joint.min(labels.len().saturating_sub(1));
+        choice_row(ui, "Seating joint", "pt_joint", &mut k.joint, &labels);
+    }
     text_row(ui, "Name", &mut k.name, solidcraft_ui_text::tr("parts.automatic_name"));
     // The part, and its table values.
-    let key = (k.family, k.size, k.length);
+    let shown_part = insert_params(&lib, k, &[]).ok();
+    let key = shown_part.as_ref().map(|p| {
+        let mut p = p.clone();
+        if let Value::Object(m) = &mut p {
+            m.remove("thread");
+            m.remove("name");
+        }
+        p.to_string()
+    });
     let tex_id = egui::Id::unique("sc_part_picture");
-    if k.picture != Some(key) {
-        let tex = insert_params(&lib, k, &[])
-            .ok()
-            .and_then(|p| picture(&p))
-            .map(|img| ui.ctx().load_texture("sc_part_picture", img, egui::TextureOptions::LINEAR));
+    if k.picture != key || key.is_none() {
+        let tex = shown_part.as_ref().and_then(picture).map(|img| ui.ctx().load_texture("sc_part_picture", img, egui::TextureOptions::LINEAR));
         ui.data_mut(|d| match tex {
             Some(t) => {
                 d.insert_temp(tex_id, t);
             }
             None => d.remove::<egui::TextureHandle>(tex_id),
         });
-        k.picture = Some(key);
+        k.picture = key;
     }
     ui.vertical(|ui| match ui.data(|d| d.get_temp::<egui::TextureHandle>(tex_id)) {
         Some(tx) => {
@@ -341,8 +563,7 @@ mod tests {
         for f in &l {
             assert_ne!(family_name(f), f.name, "{}", f.id);
         }
-        let unknown =
-            Family { id: "spring".into(), name: "Spring".into(), standard: String::new(), system: "metric".into(), sizes: vec![], lengths: None };
+        let unknown = Family { id: "spring".into(), name: "Spring".into(), system: "metric".into(), ..Default::default() };
         assert_eq!(family_name(&unknown), "Spring");
     }
 
@@ -363,7 +584,7 @@ mod tests {
     #[test]
     fn insert_params_for_picks() {
         let l = lib();
-        let k = Pt { family: 0, size: 1, length: Some(2), name: String::new(), picture: None, lib: None };
+        let k = Pt { family: 0, size: 1, length: Some(2), name: String::new(), picture: None, lib: None, ..Default::default() };
         let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
         let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
         assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20.0, "at": [5.0, 0.0, 10.0]}));
@@ -371,7 +592,7 @@ mod tests {
         let p = insert_params(&l, &k, &[hole, rim]).unwrap();
         assert_eq!(p["at"], json!([[5.0, 0.0, 10.0], [25.0, 0.0, 10.0]]));
         assert!(p.get("point").is_none());
-        let k = Pt { family: 1, size: 0, length: None, name: "Front bearing".into(), picture: None, lib: None };
+        let k = Pt { family: 1, size: 0, length: None, name: "Front bearing".into(), picture: None, lib: None, ..Default::default() };
         let p = insert_params(&l, &k, &[]).unwrap();
         assert_eq!(p["point"], json!([0.0, 0.0, 0.0]));
         assert_eq!(p["name"], "Front bearing");
@@ -430,5 +651,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The options a family and size have reach the command, and only those that are not the
+    /// default: a part asked for as before gets the parameters it always got.
+    #[test]
+    fn options_reach_the_command_only_where_they_differ_from_the_default() {
+        let mut s = solidcraft_engine::Session::default();
+        let l = families(&s.execute("parts.library", &json!({})).unwrap());
+        let find = |id: &str| l.iter().position(|f| f.id == id).unwrap();
+        let size = |f: usize, name: &str| l[f].sizes.iter().position(|s| s.0 == name).unwrap();
+        // A cap screw as it opens: nothing but family, size and placement.
+        let shcs = find("socket_head_cap_screw");
+        let k = Pt { family: shcs, size: size(shcs, "M10"), ..Default::default() };
+        let p = insert_params(&l, &k, &[]).unwrap();
+        assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M10", "point": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}));
+        // The same with every option set, seated in a hole.
+        let options = PartOptions { drive: 1, tip: 0, thread: 1, pitch: 1, left_hand: true, print_fit: true, clearance: "0,2 mm".into() };
+        let k = Pt { family: shcs, size: size(shcs, "M10"), options, joint: 3, ..Default::default() };
+        let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
+        let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
+        assert_eq!(
+            p,
+            json!({"family": "socket_head_cap_screw", "size": "M10", "drive": "hexalobular", "thread": "modeled", "pitch": 1.25,
+                   "left_hand": true, "print_fit": true, "clearance": 0.2, "at": [5.0, 0.0, 10.0], "joint": "screw"})
+        );
+        // With no hole there is no joint to ask for.
+        assert!(insert_params(&l, &k, &[]).unwrap().get("joint").is_none());
+        // A set screw's point, and a part without a thread, which has no options at all.
+        let set = find("set_screw");
+        let k = Pt { family: set, size: size(set, "M6"), options: PartOptions { tip: 2, ..Default::default() }, ..Default::default() };
+        assert_eq!(insert_params(&l, &k, &[]).unwrap()["tip"], "cup");
+        let washer = find("washer");
+        let k = Pt { family: washer, options: PartOptions { thread: 1, print_fit: true, ..Default::default() }, joint: 3, ..Default::default() };
+        let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
+        assert!(p.get("thread").is_none() && p.get("print_fit").is_none(), "{p}");
+        assert_eq!(p["joint"], "planar", "a washer has no screw joint: the fourth of its joints is the last");
+        // What is typed for the clearance must be a number.
+        let k = Pt { family: shcs, options: PartOptions { print_fit: true, clearance: "loose".into(), ..Default::default() }, ..Default::default() };
+        assert!(insert_params(&l, &k, &[]).is_err());
+        // Every command the options build is one the engine takes.
+        for (family, options) in [
+            ("pan_head_screw", PartOptions { drive: 2, thread: 2, ..Default::default() }),
+            ("set_screw", PartOptions { tip: 1, print_fit: true, ..Default::default() }),
+            ("hex_nut", PartOptions { left_hand: true, ..Default::default() }),
+        ] {
+            let f = find(family);
+            let k = Pt { family: f, size: size(f, "M6"), options, ..Default::default() };
+            let p = insert_params(&l, &k, &[]).unwrap();
+            assert!(solidcraft_engine::Session::default().execute("parts.insert", &p).is_ok(), "{p}");
+        }
+    }
+
+    /// The rows follow the family: a cap screw shows its drive and thread rows, a washer none of
+    /// them, and the joint row comes with the first hole picked.
+    #[test]
+    fn the_option_rows_follow_the_family() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.start("parts.insert");
+        h.frames(3);
+        for row in ["Drive type", "Thread type"] {
+            assert!(crate::scenario::handle_at(&format!("dialog:{row}")).is_some(), "{row}");
+        }
+        assert!(crate::scenario::handle_at("dialog:Seating joint").is_none());
+        assert!(crate::scenario::handle_at("dialog:Thread pitch").is_none(), "M2 has no fine pitch");
+        h.step(&json!({"click":{"handle":"dialog:Thread type"}})).unwrap();
+        h.step(&json!({"click":{"handle":"dialog:Thread type:Modeled thread"}})).unwrap();
+        h.frames(2);
+        let Kind::Part(k) = &h.app.dialog.as_ref().unwrap().kind else { panic!("not Insert Part") };
+        assert_eq!(commands(&h.app, k, &[]).unwrap()[0].1["thread"], "modeled");
+        h.step(&json!({"click":{"handle":"dialog:Type"}})).unwrap();
+        h.step(&json!({"click":{"handle":"dialog:Type:Plain washer (ISO 7089)"}})).unwrap();
+        h.frames(2);
+        for row in ["Drive type", "Thread type"] {
+            assert!(crate::scenario::handle_at(&format!("dialog:{row}")).is_none(), "{row}");
+        }
+        let Kind::Part(k) = &h.app.dialog.as_ref().unwrap().kind else { panic!("not Insert Part") };
+        assert!(commands(&h.app, k, &[]).unwrap()[0].1.get("thread").is_none());
     }
 }

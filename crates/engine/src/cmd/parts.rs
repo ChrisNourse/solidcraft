@@ -286,8 +286,8 @@ const PAN: [(&str, f64, f64, f64, f64, u8, f64, u8, f64, f64); 8] = [
 
 /// ISO 1207: (size, head diameter dk, head height k, slot n, slot t).
 const CHEESE: [(&str, f64, f64, f64, f64); 8] = [
-    ("M2", 3.8, 1.3, 0.5, 0.6),
-    ("M2.5", 4.5, 1.6, 0.6, 0.7),
+    ("M2", 3.8, 1.4, 0.5, 0.6),
+    ("M2.5", 4.5, 1.8, 0.6, 0.7),
     ("M3", 5.5, 2.0, 0.8, 0.85),
     ("M4", 7.0, 2.6, 1.2, 1.1),
     ("M5", 8.5, 3.3, 1.2, 1.3),
@@ -1057,10 +1057,11 @@ fn recess(s: &mut Session, r: Recess, top: f64, c: f64, reach: f64) -> Result<()
 
 /// The outline of a hexalobular recess `a` across its lobes, as twelve arcs (start, through,
 /// end) running round it: six lobes bulging out, joined by six flutes bulging in, each tangent
-/// to its neighbours. ISO 10664 gives A, the size across the flutes (0.72 A) and the lobes'
-/// radius (0.083 A); the flutes' radius follows from the arcs being tangent.
+/// to its neighbours. ISO 10664 draws it in proportion to A: across the flutes B ≈ 0.72 A, the
+/// lobes' radius ≈ 0.1 A and the flutes' ≈ 0.175 A. The first two are taken as given and the
+/// flutes' radius follows from the arcs being tangent, which comes to 0.175 A.
 fn hexalobular_arcs(a: f64) -> Vec<([f64; 2], [f64; 2], [f64; 2])> {
-    let (re, b) = (0.083 * a, 0.72 * a);
+    let (re, b) = (0.1 * a, 0.72 * a);
     // The circle the lobes' centres lie on.
     let la = a / 2.0 - re;
     let s3 = 3f64.sqrt();
