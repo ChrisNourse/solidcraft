@@ -27,8 +27,9 @@ pub struct PartsLibraryParams {
 #[schemars(deny_unknown_fields)]
 pub struct PartsInsertParams {
     /// The family, as `parts.library` lists it: socket_head_cap_screw, button_head_cap_screw,
-    /// countersunk_socket_screw, hex_bolt, hex_nut, washer, set_screw, dowel_pin, bearing, hex_cap_screw_inch,
-    /// hex_nut_inch, washer_sae or washer_uss.
+    /// countersunk_socket_screw, low_head_cap_screw, pan_head_screw, cheese_head_screw,
+    /// countersunk_screw, hex_bolt, hex_nut, washer, set_screw, dowel_pin, bearing,
+    /// hex_cap_screw_inch, hex_nut_inch, washer_sae or washer_uss.
     #[serde(deserialize_with = "family")]
     pub family: String,
     /// The size, as `parts.library` lists it: `M6`, `608` for a bearing, `1/2-13 UNC` for an
@@ -53,6 +54,37 @@ pub struct PartsInsertParams {
     /// out of the face; with `point`, its +Z against `direction` (default false).
     #[serde(default)]
     pub flip: Option<bool>,
+    /// For a part with a metric thread: `cosmetic` (default: recorded on the face, the body
+    /// unchanged), `modeled` (cut into the body: its standard thread length from the tip, the
+    /// start chamfered; slower, and refused past 80 turns) or `none`.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// A fine pitch in mm, as `parts.library` lists them for the size (default, or 0: coarse).
+    #[serde(default)]
+    pub pitch: Option<f64>,
+    /// A left-hand thread (default false).
+    #[serde(default)]
+    pub left_hand: Option<bool>,
+    /// Made to be 3D printed: the thread under size (a nut's over size) and the drive recess
+    /// wider, each by `clearance` per side (default false).
+    #[serde(default)]
+    pub print_fit: Option<bool>,
+    /// The print fit's clearance in mm per side, above 0 and at most 2 (default 0.15). Giving it
+    /// asks for a print fit.
+    #[serde(default)]
+    pub clearance: Option<f64>,
+    /// The drive recess, where the family comes with more than one (`parts.library`: `drives`):
+    /// `hex`, `hexalobular`, `cross` or `slot` (default: the family's first).
+    #[serde(default)]
+    pub drive: Option<String>,
+    /// A set screw's point: `flat` (default), `cone` or `cup`.
+    #[serde(default)]
+    pub tip: Option<String>,
+    /// With `at`: the joint each hole gets. `rigid` (default), `revolute` (turns in place),
+    /// `cylindrical` (turns and slides along the hole), `screw` (cylindrical, its turn driving
+    /// its travel by the thread's pitch) or `planar` (seated on the face, free to slide over it).
+    #[serde(default)]
+    pub joint: Option<String>,
 }
 
 /// Change an inserted standard part's size or length, rebuilding it in place; its joints keep it
@@ -70,6 +102,32 @@ pub struct PartsResizeParams {
     #[serde(default, deserialize_with = "length")]
     #[schemars(schema_with = "length_schema")]
     pub length: Option<f64>,
+    /// For a part with a metric thread: `cosmetic` (default: recorded on the face, the body
+    /// unchanged), `modeled` (cut into the body: its standard thread length from the tip, the
+    /// start chamfered; slower, and refused past 80 turns) or `none`.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// A fine pitch in mm, as `parts.library` lists them for the size (default, or 0: coarse).
+    #[serde(default)]
+    pub pitch: Option<f64>,
+    /// A left-hand thread (default false).
+    #[serde(default)]
+    pub left_hand: Option<bool>,
+    /// Made to be 3D printed: the thread under size (a nut's over size) and the drive recess
+    /// wider, each by `clearance` per side (default false).
+    #[serde(default)]
+    pub print_fit: Option<bool>,
+    /// The print fit's clearance in mm per side, above 0 and at most 2 (default 0.15). Giving it
+    /// asks for a print fit.
+    #[serde(default)]
+    pub clearance: Option<f64>,
+    /// The drive recess, where the family comes with more than one (`parts.library`: `drives`):
+    /// `hex`, `hexalobular`, `cross` or `slot` (default: the family's first).
+    #[serde(default)]
+    pub drive: Option<String>,
+    /// A set screw's point: `flat` (default), `cone` or `cup`.
+    #[serde(default)]
+    pub tip: Option<String>,
 }
 
 /// The family, with the handler's message for anything that isn't text.
@@ -195,6 +253,19 @@ pub struct PartFamily {
     pub sizes: Vec<Value>,
     /// The standard lengths (mm), for the families that have one; else `null`.
     pub lengths: Option<Vec<f64>>,
+    /// The drives `parts.insert` takes as `drive`, the default first, where the family comes
+    /// with more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drives: Option<Vec<String>>,
+    /// The ways `parts.insert` makes the thread (`thread`), for a family with a metric thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<Vec<String>>,
+    /// The fine pitches (mm) `parts.insert` takes as `pitch`, by size, for the sizes that have one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fine_pitches: Option<std::collections::BTreeMap<String, Vec<f64>>>,
+    /// The points `parts.insert` takes as `point`, for set screws.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<String>>,
 }
 
 fn sizes_schema(_: &mut SchemaGenerator) -> Schema {
@@ -210,6 +281,17 @@ pub struct InsertedPart {
     pub occurrence: u64,
     /// The component's name.
     pub name: String,
+    /// The part number it was given: its standard and size, such as `ISO 4762 M6x20`.
+    pub part_number: String,
+    /// How its thread was made (`cosmetic`, `modeled` or `none`), for a part with a metric thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// Its thread's pitch (mm), for a part with a metric thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
+    /// How far the part reaches along its own Z, `[lowest, top]` in mm, with its seating plane
+    /// at 0: a screw's tip and the top of its head.
+    pub extent: [f64; 2],
     /// With `at`: the first hole's joint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joint: Option<u64>,
@@ -237,6 +319,9 @@ pub struct ResizedPart {
     pub size: String,
     /// Its length (mm), for a part that has one; else `null`.
     pub length: Option<f64>,
+    /// How its thread is made now (`cosmetic`, `modeled` or `none`), for a part with a metric thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,

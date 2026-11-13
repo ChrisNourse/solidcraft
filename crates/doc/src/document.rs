@@ -3389,6 +3389,44 @@ pub struct StandardPart {
     pub size: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<f64>,
+    /// How a threaded part's thread is made: `modeled` (cut into the body) or `none`. Absent: a
+    /// cosmetic thread, as every part had before this was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// The drive recess, where the family comes with more than one: `hex`, `hexalobular`,
+    /// `cross` or `slot`. Absent: the family's first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
+    /// A fine pitch (mm). Absent: the size's coarse pitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
+    /// A left-hand thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_hand: bool,
+    /// Made to be 3D printed: the clearance (mm per side) its thread and drive recess are drawn
+    /// with. Absent: nominal size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_clearance: Option<f64>,
+    /// A set screw's point: `cone` or `cup`. Absent: flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<String>,
+}
+
+impl StandardPart {
+    /// A part of a family and size with every option at its default.
+    pub fn new(family: impl Into<String>, size: impl Into<String>, length: Option<f64>) -> Self {
+        Self {
+            family: family.into(),
+            size: size.into(),
+            length,
+            thread: None,
+            drive: None,
+            pitch: None,
+            left_hand: false,
+            print_clearance: None,
+            point: None,
+        }
+    }
 }
 
 /// A component whose contents come from another design file (Insert Design): where that file
