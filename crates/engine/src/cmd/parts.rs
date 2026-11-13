@@ -1366,7 +1366,9 @@ fn identity(family: &str, size: &str, sh: &Shape, o: &Options) -> (String, Strin
     };
     let name = FAMILIES.iter().find(|f| f.0 == family).map_or("Part", |f| f.1);
     let part_number = if standard.is_empty() { size.clone() } else { format!("{standard} {size}{series}") };
-    (part_number, format!("{name} {size}"))
+    // A part made to be printed is not the bought one: its description says so.
+    let fit = if o.print_clearance.is_some() { " (3D print fit)" } else { "" };
+    (part_number, format!("{name} {size}{fit}"))
 }
 
 /// Give a standard part its part number and description; a field someone changed since the last
@@ -2724,6 +2726,8 @@ mod tests {
         run(&mut s, "parts.insert", json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "print_fit": true}));
         let t = s.model.state().threads.first().cloned().unwrap();
         assert!((t.major_diameter - 5.7).abs() < 1e-9 && (t.pitch - 1.0).abs() < 1e-9, "{t:?}");
+        let described = s.doc.components.iter().find_map(|c| c.metadata.text(solidcraft_doc::metadata::DESCRIPTION).map(str::to_string));
+        assert_eq!(described.as_deref(), Some("Socket head cap screw M6x20 (3D print fit)"));
         // Shank Ø5.7 x 20, head Ø10 x 6, socket 5.3 across flats x 3 deep.
         let expect = std::f64::consts::PI * 2.85 * 2.85 * 20.0 + std::f64::consts::PI * 25.0 * 6.0 - 3f64.sqrt() / 2.0 * 5.3 * 5.3 * 3.0;
         assert!((volume(&mut s) - expect).abs() < 1e-3, "{} against {expect}", volume(&mut s));
