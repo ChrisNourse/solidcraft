@@ -246,7 +246,8 @@ pub struct Pt {
     pub options: PartOptions,
     /// Into the family's [`joints`]: how a part seated in a hole is held there.
     pub joint: usize,
-    /// Turned over where it is placed: in a hole, the head goes in from the other way.
+    /// The other way round: in from the other end of each hole picked, or turned over at the
+    /// origin with none picked.
     pub flip: bool,
     /// A component of its own, even when the design already has this part.
     pub separate: bool,
@@ -273,9 +274,6 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
         p["length"] = json!(l);
     }
     option_params(f, size, &k.options, &mut p);
-    if k.flip {
-        p["flip"] = json!(true);
-    }
     // The part the design already has is placed again, unless this one is to be its own.
     if !k.separate {
         p["share"] = json!(true);
@@ -295,6 +293,11 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
         // One hole keeps the single pick's form.
         1 => p["at"] = at.into_iter().next().unwrap_or(Value::Null),
         _ => p["at"] = Value::Array(at),
+    }
+    // Flipped, a part in a hole goes in from the hole's other end; one at the origin turns over.
+    if k.flip {
+        let key = if p.get("at").is_some() { "other_side" } else { "flip" };
+        p[key] = json!(true);
     }
     if p.get("at").is_some()
         && let Some(j) = joints(f).get(k.joint).filter(|_| k.joint > 0)
@@ -594,6 +597,38 @@ mod tests {
         assert_eq!(p["name"], "Front bearing");
         assert!(p.get("length").is_none());
         assert!(insert_params(&[], &k, &[]).is_err());
+    }
+
+    /// #16688: Flip puts a part in a hole in from the hole's other end, and turns a part at the
+    /// origin over. Unticked, the command gets neither word.
+    #[test]
+    fn flip_asks_for_the_other_side_of_a_hole() {
+        let l = lib();
+        let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
+        let k = Pt { family: 0, size: 1, length: Some(2), name: String::new(), picture: None, lib: None, flip: true, ..Default::default() };
+        let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
+        assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20.0, "at": [5.0, 0.0, 10.0], "other_side": true}));
+        let p = insert_params(&l, &k, &[]).unwrap();
+        assert_eq!((p["flip"].as_bool(), p.get("other_side")), (Some(true), None), "{p}");
+        let p = insert_params(&l, &Pt { flip: false, ..k }, std::slice::from_ref(&hole)).unwrap();
+        assert!(p.get("flip").is_none() && p.get("other_side").is_none(), "{p}");
+    }
+
+    /// The Flip row is in the dialog, and ticking it reaches the command OK runs.
+    #[test]
+    fn the_flip_row_reaches_the_command() {
+        let chosen = |h: &crate::scenario::Harness| {
+            let Kind::Part(k) = &h.app.dialog.as_ref().unwrap().kind else { panic!("not Insert Part") };
+            commands(&h.app, k, &[]).unwrap()[0].1.clone()
+        };
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.start("parts.insert");
+        h.frames(3);
+        assert!(chosen(&h).get("flip").is_none());
+        h.step(&json!({"click":{"handle":"sketch_palette:toggle:pt_flip"}})).unwrap();
+        h.frames(2);
+        assert_eq!(chosen(&h)["flip"], true);
     }
 
     /// #10316: the Unit system list above Type picks metric or inch, and Type then lists that
