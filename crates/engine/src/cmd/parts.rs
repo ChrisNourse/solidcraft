@@ -2688,6 +2688,11 @@ mod tests {
         assert_eq!(s.doc.parts.get(&comp).and_then(|p| p.length), Some(16.0));
         let e = s.execute("parts.insert", &json!({"family": "washer", "size": "M6", "share": "yes"})).unwrap_err().to_string();
         assert!(e.contains("share"), "{e}");
+        // A part someone renamed is theirs: the same part asked for again is a new one.
+        let pin = json!({"family": "dowel_pin", "size": "6", "length": 20, "point": [0, 0, 60], "share": true});
+        let named = run(&mut s, "parts.insert", pin.clone());
+        run(&mut s, "component.rename", json!({"component": named["component"], "name": "Locating pin"}));
+        assert_ne!(run(&mut s, "parts.insert", pin)["component"], named["component"]);
         // A part with others placed inside it is an assembly of its own: not shared.
         let bolt = json!({"family": "hex_bolt", "size": "M6", "length": 30, "point": [0, 0, 80], "share": true});
         let first = run(&mut s, "parts.insert", bolt.clone());
