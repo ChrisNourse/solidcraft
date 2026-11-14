@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(
             p,
             json!({"family": "socket_head_cap_screw", "size": "M10", "drive": "hexalobular", "thread": "modeled", "pitch": 1.25,
-                   "left_hand": true, "flip": true, "at": [5.0, 0.0, 10.0], "joint": "screw"})
+                   "left_hand": true, "other_side": true, "at": [5.0, 0.0, 10.0], "joint": "screw"})
         );
         // With no hole there is no joint to ask for.
         assert!(insert_params(&l, &k, &[]).unwrap().get("joint").is_none());
