@@ -52,12 +52,14 @@ pub static COMMANDS: &[CommandSpec] = &[
          them (one component, placed and seated once per pick) | point?: [x,y,z] with direction?: [x,y,z] (no joint: the part's seating plane, under a head or \
          the bottom of a nut, washer or bearing, the top of a set screw, pin or countersunk head, goes to point, and direction is its +z, from the shank's tip toward the head; default [0,0,1], \
          head up, shank down -z); flip?: bool (default false: turned over, head into the material with at, +z against direction \
-         with point); name?; for parts with a metric thread: thread?: cosmetic (default: recorded on the face, the body unchanged) | modeled (cut into the body, \
+         with point); name?; share?: bool (default false: a component of its own; true: a part the design already has, the same in family, size, length and options and \
+         under the same name, with nothing placed inside it, is placed again as one more occurrence of that component, so Change Part Size changes them \
+         all and its thread is cut once); for parts with a metric thread: thread?: cosmetic (default: recorded on the face, the body unchanged) | modeled (cut into the body, \
          its standard thread length from the tip, the start chamfered; slower, and refused past 80 turns) | none; pitch?: a fine pitch in mm, as parts.library lists \
          them for the size (default coarse); left_hand?: bool; drive?: hex | hexalobular | cross | slot, where the family comes with more than one \
          (parts.library: drives); tip?: flat | cone | cup (a set screw's point); joint?: with at, the joint each hole gets: rigid (default) | revolute (turns in place) | \
          cylindrical (turns and slides along the hole) | screw (cylindrical, its turn driving its travel by the pitch: drive it with joint.drive or a motion study to \
-         show it screwing in) | planar (seated on the face and free to slide over it, as in a slot) → component, occurrence, part_number, thread, pitch, extent \
+         show it screwing in) | planar (seated on the face and free to slide over it, as in a slot) → component, occurrence, shared? (true: the component was already in the design), part_number, thread, pitch, extent \
          ([lowest z, top z] of the part in its own frame, the seat at 0), joint?, directions (each placement's head direction in the world, the one \
          chosen), and with at: occurrences, joints (one per pick, in pick order)",
         ),
@@ -1530,17 +1532,34 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     let shown = size_text(&size, &o);
     let name = str_(p, "name").map(str::to_string).unwrap_or_else(|| part_name(&family, &shown, &sh));
     let active = s.active_component;
-    // Hardware is fitted to other parts: it starts free even as the design's first part (#2804).
-    let c = run(s, "component.create", json!({"name": name, "grounded": false}))?;
-    let (comp, occ) = (c["component"].as_u64().unwrap_or(0), c["occurrence"].as_u64().unwrap_or(0));
-    build(s, &family, &sh, &o, None)?;
-    s.doc_mut().parts.insert(comp, o.save(&family, &size, shape_len(&sh)));
     let (part_number, _) = identity(&family, &shown, &sh, &o);
-    set_identity(s, comp, identity(&family, &shown, &sh, &o), None);
-    run(s, "component.activate", json!({"component": active}))?;
+    // The same part again is one more of the part the design has: one component, which Change
+    // Part Size changes everywhere, and whose thread is cut once.
+    let share = match p.get("share") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad(cmd, "`share` must be true or false")),
+    };
+    let shared = if share { same_part(s, &o.save(&family, &size, shape_len(&sh)), &name) } else { None };
+    // How many times the part is placed already: its seats are numbered on from there.
+    let placed = shared.map_or(0, |comp| s.doc.occurrences.iter().filter(|o| o.component == comp).count());
+    let (comp, occ) = match shared {
+        Some(comp) => (comp, s.doc_mut().add_occurrence(comp, active, solidcraft_doc::IDENTITY)?),
+        None => {
+            // Hardware is fitted to other parts: it starts free even as the design's first part (#2804).
+            let c = run(s, "component.create", json!({"name": name, "grounded": false}))?;
+            let (comp, occ) = (c["component"].as_u64().unwrap_or(0), c["occurrence"].as_u64().unwrap_or(0));
+            build(s, &family, &sh, &o, None)?;
+            s.doc_mut().parts.insert(comp, o.save(&family, &size, shape_len(&sh)));
+            set_identity(s, comp, identity(&family, &shown, &sh, &o), None);
+            run(s, "component.activate", json!({"component": active}))?;
+            (comp, occ)
+        }
+    };
     let mut out = InsertedPart {
         component: comp,
         occurrence: occ,
+        shared: shared.is_some(),
         name: name.clone(),
         part_number,
         thread: pitch.map(|_| o.thread.id().to_string()),
@@ -1561,17 +1580,13 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         // own origin, where the joint below takes the part's seating point to be.
         let mut occurrences = vec![occ];
         for _ in 1..holes.len() {
-            occurrences.push(
-                run(s, "occurrence.copy", json!({"component": comp}))?["occurrence"]
-                    .as_u64()
-                    .ok_or_else(|| bad(cmd, "the copy has no occurrence"))?,
-            );
+            occurrences.push(s.doc_mut().add_occurrence(comp, active, solidcraft_doc::IDENTITY)?);
         }
         let mut joints = Vec::new();
         for (i, (((a, h), o), face)) in holes.into_iter().zip(&occurrences).zip(faces).enumerate() {
             // Seat it: its axis on the hole's, its seating plane on the hole's face, the shank
             // going into the hole (the joint mates the part's −z with the face's outward z).
-            let seat = if i == 0 { format!("{name} seat") } else { format!("{name} seat {}", i + 1) };
+            let seat = if placed + i == 0 { format!("{name} seat") } else { format!("{name} seat {}", placed + i + 1) };
             // A countersunk head sinks into the part: the foot of its cone, not its top, goes on
             // the rim picked (where the hole's cylinder meets its countersink), moved along the
             // axis by the bore's radius over the shank's, so that its 90 degree cone lies on the
@@ -1626,6 +1641,29 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         out.directions = vec![head_direction(s, occ)];
     }
     reply(cmd, out)
+}
+
+/// The standard part the design already has that is `wanted` exactly, under `name`: built (not
+/// rolled back), placed somewhere, with nothing placed inside it (a bolt holding its washer and
+/// nut is an assembly of its own), and not the component being worked in or one around it.
+fn same_part(s: &Session, wanted: &solidcraft_doc::StandardPart, name: &str) -> Option<u64> {
+    let marker = s.doc.marker.unwrap_or(s.doc.features.len());
+    let built = |comp: u64| {
+        let mut own = s.doc.features.iter().enumerate().filter(|(_, f)| f.component == comp).peekable();
+        own.peek().is_some() && own.all(|(i, _)| i < marker)
+    };
+    s.doc
+        .parts
+        .iter()
+        .find(|(comp, part)| {
+            *part == wanted
+                && s.doc.components.iter().any(|c| c.id == **comp && c.name == name)
+                && s.doc.occurrence_of(**comp).is_some()
+                && !s.doc.occurrences.iter().any(|o| o.parent == **comp)
+                && !s.doc.inside_component(s.active_component, **comp)
+                && built(**comp)
+        })
+        .map(|(comp, _)| *comp)
 }
 
 /// The way a placed part's head points in the world: its +z.
@@ -2602,6 +2640,61 @@ mod tests {
         let on: Vec<String> = s.model.state().threads.iter().map(|t| t.body.clone()).collect();
         assert_eq!(on.len(), 2, "{on:?}");
         assert!(on.contains(&first[0]) && on.contains(&second[0]), "{on:?} on {first:?} and {second:?}");
+    }
+
+    /// With `share`, the same part inserted again is one more occurrence of the component the
+    /// design has, with a seat of its own; another length, another name or no `share` builds a
+    /// new component, and Change Part Size on the shared one changes every placement.
+    #[test]
+    fn the_same_part_again_is_placed_not_built_again() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 60, "width": 30, "height": 10, "body_name": "Plate"}));
+        for x in [10, 30, 50] {
+            run(&mut s, "solid.hole", json!({"position": [x, 15, 10], "diameter": 6.4}));
+        }
+        let screw = |x: f64| json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "at": [x + 3.2, 15, 10], "share": true});
+        let a = run(&mut s, "parts.insert", screw(10.0));
+        let features = s.doc.features.len();
+        let b = run(&mut s, "parts.insert", screw(30.0));
+        assert_eq!((a["component"].clone(), a.get("shared"), b["shared"].as_bool()), (b["component"].clone(), None, Some(true)), "{a} {b}");
+        assert_ne!(a["occurrence"], b["occurrence"]);
+        assert_ne!(a["joint"], b["joint"]);
+        assert_eq!(s.doc.features.len(), features, "nothing is built for the second");
+        assert_eq!(a["directions"], b["directions"]);
+        // Each sits in its own hole.
+        let at = |occ: &Value| solidcraft_doc::joints::occurrence_world(&s.doc, occ.as_u64().unwrap())[3];
+        assert!(
+            (at(&a["occurrence"])[0] - 10.0).abs() < 1e-6 && (at(&b["occurrence"])[0] - 30.0).abs() < 1e-6,
+            "{:?} {:?}",
+            at(&a["occurrence"]),
+            at(&b["occurrence"])
+        );
+        let seats: Vec<String> = s.doc.assembly.joints.iter().map(|j| j.name.clone()).collect();
+        assert_eq!(seats, ["SHCS M6x20 seat", "SHCS M6x20 seat 2"]);
+        // Another length is another part, and so is one not asked to share, or under a name.
+        let mut longer = screw(50.0);
+        longer["length"] = json!(25);
+        assert_ne!(run(&mut s, "parts.insert", longer)["component"], a["component"]);
+        for extra in [json!({}), json!({"name": "Spare", "share": true})] {
+            let mut p = json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "point": [0, 0, 50]});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let r = run(&mut s, "parts.insert", p);
+            assert!(r["component"] != a["component"] && r.get("shared").is_none(), "{r}");
+        }
+        // Resizing the shared part resizes both placements: one component, still two occurrences.
+        run(&mut s, "parts.resize", json!({"component": a["component"], "length": 16}));
+        let comp = a["component"].as_u64().unwrap();
+        assert_eq!(s.doc.occurrences.iter().filter(|o| o.component == comp).count(), 2);
+        assert_eq!(s.doc.parts.get(&comp).and_then(|p| p.length), Some(16.0));
+        let e = s.execute("parts.insert", &json!({"family": "washer", "size": "M6", "share": "yes"})).unwrap_err().to_string();
+        assert!(e.contains("share"), "{e}");
+        // A part with others placed inside it is an assembly of its own: not shared.
+        let bolt = json!({"family": "hex_bolt", "size": "M6", "length": 30, "point": [0, 0, 80], "share": true});
+        let first = run(&mut s, "parts.insert", bolt.clone());
+        run(&mut s, "component.activate", json!({"component": first["component"]}));
+        run(&mut s, "parts.insert", json!({"family": "washer", "size": "M6", "point": [0, 0, 78]}));
+        run(&mut s, "component.activate", json!({"component": 0}));
+        assert_ne!(run(&mut s, "parts.insert", bolt)["component"], first["component"]);
     }
 
     /// `thread: modeled` cuts the thread into the shank instead of recording it: the screw loses

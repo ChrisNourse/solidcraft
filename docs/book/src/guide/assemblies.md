@@ -553,6 +553,7 @@ A part with a metric thread has more to choose:
 | Thread pitch | Coarse, or a fine pitch of the size (M8 and up). |
 | Left-hand thread | A thread that tightens anticlockwise. |
 | Flip | Turns the part over where it is placed: in a hole, the head goes in from the other way. |
+| Separate part | Inserting a part the design already has (the same type, size, length and options) places that part once more: the design holds it as one component placed several times, so **Change Part Size** on it changes every one, and a modeled thread is cut once. Tick **Separate part** for a part of its own that can be changed alone. A part with others placed inside it is never shared. From a script, `parts.insert` shares only with `"share": true`. |
 | Seating joint | Once a hole is picked: how the part is held in it. **Fixed in place** (a rigid joint) is the default. **Turns in place**, **Turns and slides** and **Screws in and out** leave the part its motion about and along the hole, for a mechanism or an animation: a part that screws in travels one pitch for each turn of its joint. **Slides over the face** seats the part on the face and leaves it free to slide, as a screw in a slot. |
 
 The live preview shows the part in place with a cosmetic thread; OK cuts a modeled one.

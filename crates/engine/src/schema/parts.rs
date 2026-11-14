@@ -54,6 +54,11 @@ pub struct PartsInsertParams {
     /// out of the face; with `point`, its +Z against `direction` (default false).
     #[serde(default)]
     pub flip: Option<bool>,
+    /// Place a part the design already has once more instead of building it again (default
+    /// false): one the same in family, size, length and options, under the same name and with
+    /// nothing placed inside it, gets one more occurrence of its component.
+    #[serde(default)]
+    pub share: Option<bool>,
     /// For a part with a metric thread: `cosmetic` (default: recorded on the face, the body
     /// unchanged), `modeled` (cut into the body: its standard thread length from the tip, the
     /// start chamfered; slower, and refused past 80 turns) or `none`.
@@ -259,10 +264,13 @@ fn sizes_schema(_: &mut SchemaGenerator) -> Schema {
 /// What `parts.insert` and `parts.fastener` return.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct InsertedPart {
-    /// The new component's id.
+    /// The part's component: a new one, or the one the design already had (`shared`).
     pub component: u64,
-    /// Its first occurrence's id.
+    /// The occurrence placed (with several holes, the first).
     pub occurrence: u64,
+    /// The design already had this part, and it was placed again rather than built again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// The component's name.
     pub name: String,
     /// The part number it was given: its standard and size, such as `ISO 4762 M6x20`.

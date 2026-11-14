@@ -23,7 +23,7 @@ fn schemas_and_the_key_check_agree() {
     assert_keys(input_schema_for::<PartsLibraryParams>(), &["family"]);
     assert_keys(
         input_schema_for::<PartsInsertParams>(),
-        &["at", "direction", "drive", "family", "flip", "joint", "left_hand", "length", "name", "pitch", "point", "size", "thread", "tip"],
+        &["at", "direction", "drive", "family", "flip", "joint", "left_hand", "length", "name", "pitch", "point", "share", "size", "thread", "tip"],
     );
     assert_keys(input_schema_for::<PartsResizeParams>(), &["component", "drive", "left_hand", "length", "pitch", "size", "thread", "tip"]);
 }

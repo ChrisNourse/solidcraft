@@ -26,7 +26,9 @@
     "parts.joint.revolute": "Turns in place",
     "parts.joint.cylindrical": "Turns and slides",
     "parts.joint.screw": "Screws in and out",
-    "parts.joint.planar": "Slides over the face"
+    "parts.joint.planar": "Slides over the face",
+    "parts.separate": "Separate part",
+    "parts.separate_hint": "a part of its own: Change Part Size on it leaves the others like it as they are"
   },
   "de": {
     "parts.family.low_head_cap_screw": "Zylinderschraube mit Innensechskant, niedriger Kopf",
@@ -55,7 +57,9 @@
     "parts.joint.revolute": "Dreht sich am Platz",
     "parts.joint.cylindrical": "Dreht und gleitet",
     "parts.joint.screw": "Schraubt sich ein und aus",
-    "parts.joint.planar": "Gleitet auf der Fläche"
+    "parts.joint.planar": "Gleitet auf der Fläche",
+    "parts.separate": "Eigenes Teil",
+    "parts.separate_hint": "ein eigenes Teil: „Bauteilgröße ändern“ lässt die anderen gleichen Teile, wie sie sind"
   },
   "ja": {
     "parts.family.low_head_cap_screw": "低頭六角穴付きボルト",
@@ -84,7 +88,9 @@
     "parts.joint.revolute": "その場で回転",
     "parts.joint.cylindrical": "回転とスライド",
     "parts.joint.screw": "ねじ込みと緩め",
-    "parts.joint.planar": "面の上をスライド"
+    "parts.joint.planar": "面の上をスライド",
+    "parts.separate": "別の部品",
+    "parts.separate_hint": "独立した部品: 部品サイズの変更は、同じ他の部品に影響しません"
   },
   "zh": {
     "parts.family.low_head_cap_screw": "内六角薄头圆柱头螺钉",
@@ -113,7 +119,9 @@
     "parts.joint.revolute": "原位转动",
     "parts.joint.cylindrical": "转动并滑动",
     "parts.joint.screw": "旋入旋出",
-    "parts.joint.planar": "在面上滑动"
+    "parts.joint.planar": "在面上滑动",
+    "parts.separate": "独立零件",
+    "parts.separate_hint": "独立的零件：更改零件尺寸不会影响其他相同的零件"
   },
   "ko": {
     "parts.family.low_head_cap_screw": "낮은 머리 육각 구멍붙이 볼트",
@@ -142,7 +150,9 @@
     "parts.joint.revolute": "제자리 회전",
     "parts.joint.cylindrical": "회전과 슬라이드",
     "parts.joint.screw": "조이고 풀기",
-    "parts.joint.planar": "면 위에서 슬라이드"
+    "parts.joint.planar": "면 위에서 슬라이드",
+    "parts.separate": "별도 부품",
+    "parts.separate_hint": "독립된 부품: 부품 크기 변경이 같은 다른 부품에 영향을 주지 않습니다"
   },
   "ar": {
     "parts.family.low_head_cap_screw": "برغي برأس أسطواني منخفض وتجويف سداسي",
@@ -171,7 +181,9 @@
     "parts.joint.revolute": "يدور في مكانه",
     "parts.joint.cylindrical": "يدور وينزلق",
     "parts.joint.screw": "يُشد ويُفك",
-    "parts.joint.planar": "ينزلق على الوجه"
+    "parts.joint.planar": "ينزلق على الوجه",
+    "parts.separate": "جزء مستقل",
+    "parts.separate_hint": "جزء مستقل: تغيير مقاس الجزء لا يغيّر الأجزاء الأخرى المماثلة"
   },
   "he": {
     "parts.family.low_head_cap_screw": "בורג אלן ראש נמוך",
@@ -200,7 +212,9 @@
     "parts.joint.revolute": "מסתובב במקומו",
     "parts.joint.cylindrical": "מסתובב ומחליק",
     "parts.joint.screw": "מתברג פנימה והחוצה",
-    "parts.joint.planar": "מחליק על הפאה"
+    "parts.joint.planar": "מחליק על הפאה",
+    "parts.separate": "חלק נפרד",
+    "parts.separate_hint": "חלק נפרד: שינוי גודל החלק אינו משנה את החלקים הזהים האחרים"
   },
   "vi": {
     "parts.family.low_head_cap_screw": "Vít đầu trụ thấp lục giác chìm",
@@ -229,6 +243,8 @@
     "parts.joint.revolute": "Xoay tại chỗ",
     "parts.joint.cylindrical": "Xoay và trượt",
     "parts.joint.screw": "Vặn vào và ra",
-    "parts.joint.planar": "Trượt trên mặt"
+    "parts.joint.planar": "Trượt trên mặt",
+    "parts.separate": "Chi tiết riêng",
+    "parts.separate_hint": "một chi tiết riêng: Đổi kích thước chi tiết không làm thay đổi các chi tiết giống nó"
   }
 }

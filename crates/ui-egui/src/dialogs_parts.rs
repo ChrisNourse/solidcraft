@@ -248,6 +248,8 @@ pub struct Pt {
     pub joint: usize,
     /// Turned over where it is placed: in a hole, the head goes in from the other way.
     pub flip: bool,
+    /// A component of its own, even when the design already has this part.
+    pub separate: bool,
 }
 
 /// The dialog for Insert Part.
@@ -273,6 +275,10 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
     option_params(f, size, &k.options, &mut p);
     if k.flip {
         p["flip"] = json!(true);
+    }
+    // The part the design already has is placed again, unless this one is to be its own.
+    if !k.separate {
+        p["share"] = json!(true);
     }
     let at: Vec<Value> = holes
         .iter()
@@ -329,6 +335,7 @@ fn picture(p: &Value) -> Option<egui::ColorImage> {
         m.remove("thread");
         m.remove("joint");
         m.remove("flip");
+        m.remove("share");
         m.remove("at");
         m.insert("point".into(), json!([0.0, 0.0, 0.0]));
         m.insert("direction".into(), json!([0.0, 0.0, 1.0]));
@@ -415,6 +422,14 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
     if crate::ui_kit::checkbox_row(ui, "pt_flip", "Flip", k.flip) {
         k.flip = !k.flip;
     }
+    if crate::ui_kit::checkbox_row(ui, "pt_separate", "Separate part", k.separate) {
+        k.separate = !k.separate;
+    }
+    if k.separate {
+        ui.vertical(|ui| {
+            crate::ui_kit::text(ui, solidcraft_ui_text::tr("parts.separate_hint"), crate::ui_kit::Text::Note("parts_separate"));
+        });
+    }
     // How a part seated in a hole is held there: asked once a hole is picked.
     if inputs.first().is_some_and(|i| !i.items.is_empty()) {
         let kinds = joints(f);
@@ -431,6 +446,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
             m.remove("thread");
             m.remove("name");
             m.remove("flip");
+            m.remove("share");
         }
         p.to_string()
     });
@@ -567,7 +583,7 @@ mod tests {
         let k = Pt { family: 0, size: 1, length: Some(2), name: String::new(), picture: None, lib: None, ..Default::default() };
         let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
         let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
-        assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20.0, "at": [5.0, 0.0, 10.0]}));
+        assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20.0, "share": true, "at": [5.0, 0.0, 10.0]}));
         let rim = Sel::Edge { body: "Body1".into(), index: 7, point: Vec3::new(25.0, 0.0, 10.0) };
         let p = insert_params(&l, &k, &[hole, rim]).unwrap();
         assert_eq!(p["at"], json!([[5.0, 0.0, 10.0], [25.0, 0.0, 10.0]]));
@@ -645,10 +661,13 @@ mod tests {
         let shcs = find("socket_head_cap_screw");
         let k = Pt { family: shcs, size: size(shcs, "M10"), ..Default::default() };
         let p = insert_params(&l, &k, &[]).unwrap();
-        assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M10", "point": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}));
+        assert_eq!(
+            p,
+            json!({"family": "socket_head_cap_screw", "size": "M10", "share": true, "point": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]})
+        );
         // The same with every option set, seated in a hole.
         let options = PartOptions { drive: 1, tip: 0, thread: 1, pitch: 1, left_hand: true };
-        let k = Pt { family: shcs, size: size(shcs, "M10"), options, joint: 3, flip: true, ..Default::default() };
+        let k = Pt { family: shcs, size: size(shcs, "M10"), options, joint: 3, flip: true, separate: true, ..Default::default() };
         let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
         let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
         assert_eq!(
