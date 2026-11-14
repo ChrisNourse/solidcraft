@@ -45,7 +45,7 @@ pub struct Resize {
     pub size: usize,
     pub length: Option<f64>,
     original_size: usize,
-    /// How the part is made beyond its size: its drive, its thread, a print fit.
+    /// How the part is made beyond its size: its drive and its thread.
     pub options: crate::dialogs_parts::PartOptions,
     original_options: crate::dialogs_parts::PartOptions,
     family: Family,
@@ -227,7 +227,7 @@ pub fn commands(app: &SolveApp, k: &Resize) -> Result<Vec<(String, Value)>, Stri
         params["length"] = json!(length);
     }
     if k.options != k.original_options {
-        crate::dialogs_parts::resize_option_params(&k.family, size, &k.options, &mut params)?;
+        crate::dialogs_parts::resize_option_params(&k.family, size, &k.options, &mut params);
     } else if k.size == k.original_size && k.source.parts.get(&k.component).is_some_and(|part| part.length == k.length) {
         return Ok(Vec::new());
     }

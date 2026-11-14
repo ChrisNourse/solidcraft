@@ -65,14 +65,6 @@ pub struct PartsInsertParams {
     /// A left-hand thread (default false).
     #[serde(default)]
     pub left_hand: Option<bool>,
-    /// Made to be 3D printed: the thread under size (a nut's over size) and the drive recess
-    /// wider, each by `clearance` per side (default false).
-    #[serde(default)]
-    pub print_fit: Option<bool>,
-    /// The print fit's clearance in mm per side, above 0 and at most 2 (default 0.15). Giving it
-    /// asks for a print fit.
-    #[serde(default)]
-    pub clearance: Option<f64>,
     /// The drive recess, where the family comes with more than one (`parts.library`: `drives`):
     /// `hex`, `hexalobular`, `cross` or `slot` (default: the family's first).
     #[serde(default)]
@@ -113,14 +105,6 @@ pub struct PartsResizeParams {
     /// A left-hand thread (default false).
     #[serde(default)]
     pub left_hand: Option<bool>,
-    /// Made to be 3D printed: the thread under size (a nut's over size) and the drive recess
-    /// wider, each by `clearance` per side (default false).
-    #[serde(default)]
-    pub print_fit: Option<bool>,
-    /// The print fit's clearance in mm per side, above 0 and at most 2 (default 0.15). Giving it
-    /// asks for a print fit.
-    #[serde(default)]
-    pub clearance: Option<f64>,
     /// The drive recess, where the family comes with more than one (`parts.library`: `drives`):
     /// `hex`, `hexalobular`, `cross` or `slot` (default: the family's first).
     #[serde(default)]

@@ -3403,10 +3403,6 @@ pub struct StandardPart {
     /// A left-hand thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub left_hand: bool,
-    /// Made to be 3D printed: the clearance (mm per side) its thread and drive recess are drawn
-    /// with. Absent: nominal size.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub print_clearance: Option<f64>,
     /// A set screw's point: `cone` or `cup`. Absent: flat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point: Option<String>,
@@ -3415,17 +3411,7 @@ pub struct StandardPart {
 impl StandardPart {
     /// A part of a family and size with every option at its default.
     pub fn new(family: impl Into<String>, size: impl Into<String>, length: Option<f64>) -> Self {
-        Self {
-            family: family.into(),
-            size: size.into(),
-            length,
-            thread: None,
-            drive: None,
-            pitch: None,
-            left_hand: false,
-            print_clearance: None,
-            point: None,
-        }
+        Self { family: family.into(), size: size.into(), length, thread: None, drive: None, pitch: None, left_hand: false, point: None }
     }
 }
 

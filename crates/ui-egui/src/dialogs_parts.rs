@@ -3,8 +3,8 @@
 //! Picking a hole (its wall or rim) seats the part in it with a rigid joint, and picking several
 //! seats the same part in each; without one the part goes at the origin. The live preview shows it
 //! placed. A threaded part also takes its drive, a set screw's point, how its thread is made
-//! (cosmetic, cut into the body or none), a fine pitch, a left-hand thread and a fit for 3D
-//! printing; seated in holes, it takes the joint that holds it there.
+//! (cosmetic, cut into the body or none), a fine pitch and a left-hand thread; seated in holes, it
+//! takes the joint that holds it there. Flip turns the part over where it is placed.
 
 use crate::ui_kit::{choice_row, text_row};
 use egui::vec2;
@@ -48,9 +48,6 @@ pub struct PartOptions {
     /// 0: coarse; else the size's fine pitch before it.
     pub pitch: usize,
     pub left_hand: bool,
-    pub print_fit: bool,
-    /// The print fit's clearance per side as typed (empty: the default).
-    pub clearance: String,
 }
 
 /// How a thread is made: the command's word and the list's label.
@@ -126,15 +123,6 @@ pub(crate) fn option_rows(ui: &mut egui::Ui, f: &Family, size: &str, o: &mut Par
     if o.thread != 2 && crate::ui_kit::checkbox_row(ui, "pt_left_hand", "Left-hand thread", o.left_hand) {
         o.left_hand = !o.left_hand;
     }
-    if crate::ui_kit::checkbox_row(ui, "pt_print_fit", "3D print fit", o.print_fit) {
-        o.print_fit = !o.print_fit;
-    }
-    if o.print_fit {
-        text_row(ui, "Clearance per side", &mut o.clearance, "0.15 mm");
-        ui.vertical(|ui| {
-            crate::ui_kit::text(ui, solidcraft_ui_text::tr("parts.print_fit_hint"), crate::ui_kit::Text::Note("parts_print_fit"));
-        });
-    }
 }
 
 /// The options a part was made with, as the dialog's lists hold them.
@@ -146,14 +134,12 @@ pub(crate) fn options_of(f: &Family, part: &solidcraft_engine::doc::StandardPart
         thread: THREADS.iter().position(|t| Some(t.0) == part.thread.as_deref()).unwrap_or(0),
         pitch: part.pitch.and_then(|p| f.fine.get(&part.size).and_then(|fine| fine.iter().position(|x| (*x - p).abs() < 1e-9))).map_or(0, |i| i + 1),
         left_hand: part.left_hand,
-        print_fit: part.print_clearance.is_some(),
-        clearance: part.print_clearance.map(|c| c.to_string()).unwrap_or_default(),
     }
 }
 
 /// The options as Change Part Size takes them: every one the family has, spelled out, so a
 /// choice put back to its default replaces what the part was made with.
-pub(crate) fn resize_option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) -> Result<(), String> {
+pub(crate) fn resize_option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) {
     if f.drives.len() > 1 {
         p["drive"] = json!(f.drives.get(o.drive));
     }
@@ -161,22 +147,15 @@ pub(crate) fn resize_option_params(f: &Family, size: &str, o: &PartOptions, p: &
         p["tip"] = json!(f.points.get(o.tip));
     }
     if !f.threaded {
-        return Ok(());
+        return;
     }
     p["thread"] = json!(THREADS.get(o.thread).map_or("cosmetic", |t| t.0));
     p["pitch"] = json!(o.pitch.checked_sub(1).and_then(|i| f.fine.get(size).and_then(|fine| fine.get(i))).copied().unwrap_or(0.0));
     p["left_hand"] = json!(o.left_hand && o.thread != 2);
-    p["print_fit"] = json!(o.print_fit);
-    let mut typed = json!({});
-    option_params(f, size, &PartOptions { print_fit: o.print_fit, clearance: o.clearance.clone(), ..Default::default() }, &mut typed)?;
-    if let Some(c) = typed.get("clearance") {
-        p["clearance"] = c.clone();
-    }
-    Ok(())
 }
 
 /// The options as the commands take them: only those that are not the default.
-pub(crate) fn option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) -> Result<(), String> {
+pub(crate) fn option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Value) {
     if let Some(d) = f.drives.get(o.drive).filter(|_| o.drive > 0) {
         p["drive"] = json!(d);
     }
@@ -184,7 +163,7 @@ pub(crate) fn option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Val
         p["tip"] = json!(t);
     }
     if !f.threaded {
-        return Ok(());
+        return;
     }
     if let Some(t) = THREADS.get(o.thread).filter(|_| o.thread > 0) {
         p["thread"] = json!(t.0);
@@ -197,15 +176,6 @@ pub(crate) fn option_params(f: &Family, size: &str, o: &PartOptions, p: &mut Val
     if o.left_hand && o.thread != 2 {
         p["left_hand"] = json!(true);
     }
-    if o.print_fit {
-        p["print_fit"] = json!(true);
-        let typed = o.clearance.trim().trim_end_matches("mm").trim();
-        if !typed.is_empty() {
-            let c: f64 = typed.replace(',', ".").parse().map_err(|_| "the clearance must be a number in mm".to_string())?;
-            p["clearance"] = json!(c);
-        }
-    }
-    Ok(())
 }
 
 /// The library as `parts.library` gives it.
@@ -276,6 +246,8 @@ pub struct Pt {
     pub options: PartOptions,
     /// Into the family's [`joints`]: how a part seated in a hole is held there.
     pub joint: usize,
+    /// Turned over where it is placed: in a hole, the head goes in from the other way.
+    pub flip: bool,
 }
 
 /// The dialog for Insert Part.
@@ -298,7 +270,10 @@ pub fn insert_params(lib: &[Family], k: &Pt, holes: &[Sel]) -> Result<Value, Str
     if let Some(l) = k.length.and_then(|i| f.lengths.as_ref().and_then(|ls| ls.get(i))) {
         p["length"] = json!(l);
     }
-    option_params(f, size, &k.options, &mut p)?;
+    option_params(f, size, &k.options, &mut p);
+    if k.flip {
+        p["flip"] = json!(true);
+    }
     let at: Vec<Value> = holes
         .iter()
         .filter_map(|h| match h {
@@ -353,6 +328,7 @@ fn picture(p: &Value) -> Option<egui::ColorImage> {
         // at this size.
         m.remove("thread");
         m.remove("joint");
+        m.remove("flip");
         m.remove("at");
         m.insert("point".into(), json!([0.0, 0.0, 0.0]));
         m.insert("direction".into(), json!([0.0, 0.0, 1.0]));
@@ -436,6 +412,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
     }
     let size_name = f.sizes.get(k.size).map_or("", |s| s.0.as_str()).to_string();
     option_rows(ui, f, &size_name, &mut k.options);
+    if crate::ui_kit::checkbox_row(ui, "pt_flip", "Flip", k.flip) {
+        k.flip = !k.flip;
+    }
     // How a part seated in a hole is held there: asked once a hole is picked.
     if inputs.first().is_some_and(|i| !i.items.is_empty()) {
         let kinds = joints(f);
@@ -451,6 +430,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
         if let Value::Object(m) = &mut p {
             m.remove("thread");
             m.remove("name");
+            m.remove("flip");
         }
         p.to_string()
     });
@@ -667,14 +647,14 @@ mod tests {
         let p = insert_params(&l, &k, &[]).unwrap();
         assert_eq!(p, json!({"family": "socket_head_cap_screw", "size": "M10", "point": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}));
         // The same with every option set, seated in a hole.
-        let options = PartOptions { drive: 1, tip: 0, thread: 1, pitch: 1, left_hand: true, print_fit: true, clearance: "0,2 mm".into() };
-        let k = Pt { family: shcs, size: size(shcs, "M10"), options, joint: 3, ..Default::default() };
+        let options = PartOptions { drive: 1, tip: 0, thread: 1, pitch: 1, left_hand: true };
+        let k = Pt { family: shcs, size: size(shcs, "M10"), options, joint: 3, flip: true, ..Default::default() };
         let hole = Sel::Face { body: "Body1".into(), index: 3, point: Vec3::new(5.0, 0.0, 10.0) };
         let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
         assert_eq!(
             p,
             json!({"family": "socket_head_cap_screw", "size": "M10", "drive": "hexalobular", "thread": "modeled", "pitch": 1.25,
-                   "left_hand": true, "print_fit": true, "clearance": 0.2, "at": [5.0, 0.0, 10.0], "joint": "screw"})
+                   "left_hand": true, "flip": true, "at": [5.0, 0.0, 10.0], "joint": "screw"})
         );
         // With no hole there is no joint to ask for.
         assert!(insert_params(&l, &k, &[]).unwrap().get("joint").is_none());
@@ -683,17 +663,14 @@ mod tests {
         let k = Pt { family: set, size: size(set, "M6"), options: PartOptions { tip: 2, ..Default::default() }, ..Default::default() };
         assert_eq!(insert_params(&l, &k, &[]).unwrap()["tip"], "cup");
         let washer = find("washer");
-        let k = Pt { family: washer, options: PartOptions { thread: 1, print_fit: true, ..Default::default() }, joint: 3, ..Default::default() };
+        let k = Pt { family: washer, options: PartOptions { thread: 1, left_hand: true, ..Default::default() }, joint: 3, ..Default::default() };
         let p = insert_params(&l, &k, std::slice::from_ref(&hole)).unwrap();
-        assert!(p.get("thread").is_none() && p.get("print_fit").is_none(), "{p}");
+        assert!(p.get("thread").is_none() && p.get("left_hand").is_none(), "{p}");
         assert_eq!(p["joint"], "planar", "a washer has no screw joint: the fourth of its joints is the last");
-        // What is typed for the clearance must be a number.
-        let k = Pt { family: shcs, options: PartOptions { print_fit: true, clearance: "loose".into(), ..Default::default() }, ..Default::default() };
-        assert!(insert_params(&l, &k, &[]).is_err());
         // Every command the options build is one the engine takes.
         for (family, options) in [
             ("pan_head_screw", PartOptions { drive: 2, thread: 2, ..Default::default() }),
-            ("set_screw", PartOptions { tip: 1, print_fit: true, ..Default::default() }),
+            ("set_screw", PartOptions { tip: 1, ..Default::default() }),
             ("hex_nut", PartOptions { left_hand: true, ..Default::default() }),
         ] {
             let f = find(family);

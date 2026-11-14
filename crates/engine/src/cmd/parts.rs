@@ -54,8 +54,7 @@ pub static COMMANDS: &[CommandSpec] = &[
          head up, shank down -z); flip?: bool (default false: turned over, head into the material with at, +z against direction \
          with point); name?; for parts with a metric thread: thread?: cosmetic (default: recorded on the face, the body unchanged) | modeled (cut into the body, \
          its standard thread length from the tip, the start chamfered; slower, and refused past 80 turns) | none; pitch?: a fine pitch in mm, as parts.library lists \
-         them for the size (default coarse); left_hand?: bool; print_fit?: bool (made to be 3D printed: the thread under size and the drive recess wider by \
-         clearance?: mm per side, default 0.15; a nut's thread over size); drive?: hex | hexalobular | cross | slot, where the family comes with more than one \
+         them for the size (default coarse); left_hand?: bool; drive?: hex | hexalobular | cross | slot, where the family comes with more than one \
          (parts.library: drives); tip?: flat | cone | cup (a set screw's point); joint?: with at, the joint each hole gets: rigid (default) | revolute (turns in place) | \
          cylindrical (turns and slides along the hole) | screw (cylindrical, its turn driving its travel by the pitch: drive it with joint.drive or a motion study to \
          show it screwing in) | planar (seated on the face and free to slide over it, as in a slot) → component, occurrence, part_number, thread, pitch, extent \
@@ -67,7 +66,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .contract(&RESIZE_CONTRACT)
         .output(output_schema_for::<ResizedPart>)
         .params(
-            "component: id|name of an inserted part; size?; length?; thread?, pitch? (0: coarse), left_hand?, print_fit?, clearance?, drive?, tip? as \
+            "component: id|name of an inserted part; size?; length?; thread?, pitch? (0: coarse), left_hand?, drive?, tip? as \
              parts.insert takes them (each left out keeps what the part has) — rebuilds it (joints keep it seated)",
         ),
 ];
@@ -329,9 +328,6 @@ const CROSS: [(f64, f64); 5] = [(0.81, 0.6), (1.27, 1.0), (2.29, 1.5), (3.81, 2.
 /// its length, and a part with more is asked for with a cosmetic thread instead.
 const MAX_MODELED_TURNS: f64 = 80.0;
 
-/// The clearance (mm per side) a part made to be 3D printed gets when none is given.
-const PRINT_CLEARANCE: f64 = 0.15;
-
 /// ISO 8734 diameters.
 const DOWEL: [f64; 9] = [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0];
 
@@ -537,8 +533,6 @@ struct Options {
     /// A fine pitch; none: coarse.
     pitch: Option<f64>,
     left_hand: bool,
-    /// Made to be 3D printed, with this clearance per side on the thread and the drive recess.
-    print_clearance: Option<f64>,
     /// A set screw's `cone` or `cup` point; none: flat.
     point: Option<String>,
 }
@@ -554,7 +548,6 @@ impl Options {
             drive: part.drive.clone(),
             pitch: part.pitch,
             left_hand: part.left_hand,
-            print_clearance: part.print_clearance,
             point: part.point.clone(),
         }
     }
@@ -565,13 +558,8 @@ impl Options {
         part.drive = self.drive.clone();
         part.pitch = self.pitch;
         part.left_hand = self.left_hand;
-        part.print_clearance = self.print_clearance;
         part.point = self.point.clone();
         part
-    }
-
-    fn clearance(&self) -> f64 {
-        self.print_clearance.unwrap_or(0.0)
     }
 }
 
@@ -740,9 +728,6 @@ fn shape_with(family: &str, size: &str, length: Option<f64>, o: &Options) -> std
     if o.point.is_some() && family != "set_screw" {
         return Err("`tip` is a set screw's point: flat, cone or cup".into());
     }
-    if o.print_clearance.is_some() && !threaded(family) {
-        return Err(format!("`print_fit` loosens a thread and a drive recess; a {name} has neither"));
-    }
     // A fine pitch replaces the size's coarse one.
     let metric = |size: &str| metric(size).map(|(d, p)| (d, o.pitch.unwrap_or(p)));
     let hexalobular = |number: u8, t: f64| -> std::result::Result<Recess, String> {
@@ -903,12 +888,6 @@ fn shape_with(family: &str, size: &str, length: Option<f64>, o: &Options) -> std
             (MAX_MODELED_TURNS * pitch).floor()
         ));
     }
-    if let Some(c) = o.print_clearance
-        && let Shape::Screw { d, .. } | Shape::Rod { d, .. } | Shape::Nut { d, .. } = sh
-        && c >= d / 6.0
-    {
-        return Err(format!("`clearance` {c} mm is too much for a {size} thread: under {} mm", tidy(d / 6.0)));
-    }
     Ok(sh)
 }
 
@@ -985,8 +964,7 @@ fn fix_all(s: &mut Session) -> Result<()> {
     Ok(())
 }
 
-/// The thread of a part: on the cylindrical face at `at`, of the thread diameter `d` (the
-/// part's, less or plus its print clearance). `start` is a point near the end the thread starts
+/// The thread of a part: on the cylindrical face at `at`, of the thread diameter `d`. `start` is a point near the end the thread starts
 /// from and `length` how far it runs from there (none: the whole face); `external` threads get
 /// their start chamfered when modelled, as a real screw's end is.
 fn thread(s: &mut Session, o: &Options, (d, pitch): (f64, f64), at: Vec3, start: Vec3, length: Option<f64>, external: bool) -> Result<()> {
@@ -1015,9 +993,9 @@ fn thread(s: &mut Session, o: &Options, (d, pitch): (f64, f64), at: Vec3, start:
     }
 }
 
-/// A recess cut down from the top of a head at z = `top`. `c` widens it per side (a printed
-/// part); `reach` is past the head's rim, for a slot.
-fn recess(s: &mut Session, r: Recess, top: f64, c: f64, reach: f64) -> Result<()> {
+/// A recess cut down from the top of a head at z = `top`; `reach` is past the head's rim,
+/// for a slot.
+fn recess(s: &mut Session, r: Recess, top: f64, reach: f64) -> Result<()> {
     // A slab through the axis: its outline (across, z) drawn on a plane holding the axis, and
     // extruded both ways to `width`.
     let slab = |s: &mut Session, plane: &str, outline: [(f64, f64); 4], width: f64| -> Result<()> {
@@ -1034,7 +1012,7 @@ fn recess(s: &mut Session, r: Recess, top: f64, c: f64, reach: f64) -> Result<()
     match r {
         Recess::Hexalobular { a, t } => {
             run(s, "sketch.create", json!({"plane": "XY", "offset": format!("{top} mm")}))?;
-            for (start, through, end) in hexalobular_arcs(a + 2.0 * c) {
+            for (start, through, end) in hexalobular_arcs(a) {
                 run(s, "sketch.arc.three_point", json!({"start": start, "through": through, "end": end}))?;
             }
             fix_all(s)?;
@@ -1042,14 +1020,13 @@ fn recess(s: &mut Session, r: Recess, top: f64, c: f64, reach: f64) -> Result<()
             run(s, "solid.extrude", json!({"distance": format!("{t} mm"), "direction": "negative", "operation": "cut"}))?;
         }
         Recess::Cross { m, g, wing, t } => {
-            let (m, wing) = (m + 2.0 * c, wing + 2.0 * c);
             let outline = [(-m / 2.0, top), (m / 2.0, top), (g / 2.0, top - t), (-g / 2.0, top - t)];
             slab(s, "XZ", outline, wing)?;
             slab(s, "YZ", outline, wing)?;
         }
         Recess::Slot { n, t } => {
             let outline = [(-reach, top + 1.0), (reach, top + 1.0), (reach, top - t), (-reach, top - t)];
-            slab(s, "XZ", outline, n + 2.0 * c)?;
+            slab(s, "XZ", outline, n)?;
         }
     }
     Ok(())
@@ -1089,12 +1066,8 @@ fn hexalobular_arcs(a: f64) -> Vec<([f64; 2], [f64; 2], [f64; 2])> {
 /// Build a part in the active component.
 fn build(s: &mut Session, family: &str, sh: &Shape, o: &Options, body_name: Option<&str>) -> Result<()> {
     let _frame = crate::frames::local_geometry();
-    // A part made to be printed: its external thread and shank drawn under size, an internal
-    // thread over size, and its recess wider, each by the clearance per side.
-    let c = o.clearance();
     match *sh {
-        Shape::Screw { d: nominal, pitch, len, head, socket, recess: cut } => {
-            let d = nominal - 2.0 * c;
+        Shape::Screw { d, pitch, len, head, socket, recess: cut } => {
             let k = match head {
                 // One revolved outline: shank and round head.
                 Head::Round { dk, k } => {
@@ -1140,10 +1113,10 @@ fn build(s: &mut Session, family: &str, sh: &Shape, o: &Options, body_name: Opti
                 Head::Hex { s, .. } => (k, 2.0 * s),
             };
             if let Some((af, t)) = socket {
-                hex(s, af + 2.0 * c, top, top - t, "cut", None)?;
+                hex(s, af, top, top - t, "cut", None)?;
             }
             if let Some(r) = cut {
-                recess(s, r, top, c, reach)?;
+                recess(s, r, top, reach)?;
             }
             if let Some(p) = pitch {
                 // The shank, which a countersunk head leaves shorter than the length.
@@ -1151,12 +1124,11 @@ fn build(s: &mut Session, family: &str, sh: &Shape, o: &Options, body_name: Opti
                     Head::Countersunk { k, .. } => len - k,
                     _ => len,
                 };
-                let length = if o.thread == ThreadMode::Modeled { thread_length(family, nominal, p, shank) } else { None };
+                let length = if o.thread == ThreadMode::Modeled { thread_length(family, d, p, shank) } else { None };
                 thread(s, o, (d, p), Vec3::new(d / 2.0, 0.0, shank / 2.0 - len), Vec3::new(d / 2.0, 0.0, -len + 0.1 * shank), length, true)?;
             }
         }
-        Shape::Nut { d: nominal, pitch, s: af, m } => {
-            let d = nominal + 2.0 * c;
+        Shape::Nut { d, pitch, s: af, m } => {
             hex(s, af, 0.0, m, "new", body_name)?;
             cyl(s, d, -1.0, m + 1.0, "cut")?;
             if let Some(p) = pitch {
@@ -1166,8 +1138,7 @@ fn build(s: &mut Session, family: &str, sh: &Shape, o: &Options, body_name: Opti
         Shape::Ring { d_in, d_out, h } => {
             revolve(s, &[(d_in / 2.0, 0.0), (d_out / 2.0, 0.0), (d_out / 2.0, h), (d_in / 2.0, h)], "new", body_name)?;
         }
-        Shape::Rod { d: nominal, pitch, len, socket, point } => {
-            let d = nominal - 2.0 * c;
+        Shape::Rod { d, pitch, len, socket, point } => {
             let r = d / 2.0;
             // Where the cylinder ends above the point.
             let foot = match point {
@@ -1196,7 +1167,7 @@ fn build(s: &mut Session, family: &str, sh: &Shape, o: &Options, body_name: Opti
                 }
             };
             if let Some((af, t)) = socket {
-                hex(s, af + 2.0 * c, 0.0, -t, "cut", None)?;
+                hex(s, af, 0.0, -t, "cut", None)?;
             }
             if let Some(p) = pitch {
                 thread(s, o, (d, p), Vec3::new(r, 0.0, foot / 2.0), Vec3::new(r, 0.0, 0.9 * foot), None, true)?;
@@ -1366,9 +1337,7 @@ fn identity(family: &str, size: &str, sh: &Shape, o: &Options) -> (String, Strin
     };
     let name = FAMILIES.iter().find(|f| f.0 == family).map_or("Part", |f| f.1);
     let part_number = if standard.is_empty() { size.clone() } else { format!("{standard} {size}{series}") };
-    // A part made to be printed is not the bought one: its description says so.
-    let fit = if o.print_clearance.is_some() { " (3D print fit)" } else { "" };
-    (part_number, format!("{name} {size}{fit}"))
+    (part_number, format!("{name} {size}"))
 }
 
 /// Give a standard part its part number and description; a field someone changed since the last
@@ -1475,22 +1444,6 @@ fn options(p: &Value, cmd: &str, base: Options) -> Result<Options> {
     }
     if let Some(b) = flag("left_hand")? {
         o.left_hand = b;
-    }
-    // `clearance` alone asks for a printed part; `print_fit: false` makes it a nominal one again.
-    let clearance = match p.get("clearance") {
-        None | Some(Value::Null) => None,
-        Some(_) => Some(
-            num(p, "clearance")
-                .filter(|c| c.is_finite() && *c > 0.0 && *c <= 2.0)
-                .ok_or_else(|| bad(cmd, "`clearance` must be above 0 and at most 2 mm per side"))?,
-        ),
-    };
-    match (flag("print_fit")?, clearance) {
-        (Some(false), Some(_)) => return Err(bad(cmd, "`clearance` is the print fit's: leave it out with `print_fit: false`")),
-        (Some(false), None) => o.print_clearance = None,
-        (_, Some(c)) => o.print_clearance = Some(c),
-        (Some(true), None) => o.print_clearance = Some(o.print_clearance.unwrap_or(PRINT_CLEARANCE)),
-        (None, None) => {}
     }
     Ok(o)
 }
@@ -2692,7 +2645,7 @@ mod tests {
         assert!(e.contains("cosmetic") && e.contains("120 turns"), "{e}");
     }
 
-    /// A fine pitch, a left-hand thread and a print fit are recorded on the thread, named on the
+    /// A fine pitch and a left-hand thread are recorded on the thread, named on the
     /// part, and refused where the size or family has none.
     #[test]
     fn thread_options_reach_the_thread_and_the_part_number() {
@@ -2716,29 +2669,6 @@ mod tests {
         }
         let lib = run(&mut s, "parts.library", json!({"family": "hex_bolt"}));
         assert_eq!(lib["fine_pitches"]["M10"], json!([1.25, 1.0]), "{lib}");
-    }
-
-    /// A part made to be printed: its shank and thread 0.15 mm under size per side (or the
-    /// clearance given), its socket as much wider, and a nut's thread over size.
-    #[test]
-    fn a_print_fit_loosens_the_thread_and_widens_the_socket() {
-        let mut s = Session::default();
-        run(&mut s, "parts.insert", json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "print_fit": true}));
-        let t = s.model.state().threads.first().cloned().unwrap();
-        assert!((t.major_diameter - 5.7).abs() < 1e-9 && (t.pitch - 1.0).abs() < 1e-9, "{t:?}");
-        let described = s.doc.components.iter().find_map(|c| c.metadata.text(solidcraft_doc::metadata::DESCRIPTION).map(str::to_string));
-        assert_eq!(described.as_deref(), Some("Socket head cap screw M6x20 (3D print fit)"));
-        // Shank Ø5.7 x 20, head Ø10 x 6, socket 5.3 across flats x 3 deep.
-        let expect = std::f64::consts::PI * 2.85 * 2.85 * 20.0 + std::f64::consts::PI * 25.0 * 6.0 - 3f64.sqrt() / 2.0 * 5.3 * 5.3 * 3.0;
-        assert!((volume(&mut s) - expect).abs() < 1e-3, "{} against {expect}", volume(&mut s));
-        let mut n = Session::default();
-        run(&mut n, "parts.insert", json!({"family": "hex_nut", "size": "M6", "clearance": 0.2}));
-        let t = n.model.state().threads.first().cloned().unwrap();
-        assert!((t.major_diameter - 6.4).abs() < 1e-9 && t.internal, "{t:?}");
-        let e = n.execute("parts.insert", &json!({"family": "hex_nut", "size": "M6", "clearance": 3})).unwrap_err().to_string();
-        assert!(e.contains("clearance"), "{e}");
-        let e = n.execute("parts.insert", &json!({"family": "washer", "size": "M6", "print_fit": true})).unwrap_err().to_string();
-        assert!(e.contains("print_fit"), "{e}");
     }
 
     /// The families with heads of their own, to their tables: each is one closed body as wide as

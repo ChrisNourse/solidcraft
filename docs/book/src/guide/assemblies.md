@@ -552,7 +552,7 @@ A part with a metric thread has more to choose:
 | Thread type | **Cosmetic** records the thread on the face and leaves the body a plain cylinder: quick, and enough for drawings and the parts list. **Modeled** cuts the thread into the body, over the standard's thread length from the tip, with the start chamfered: slower to build, and right for a section view, a render or a print. A thread of more than 80 turns is refused; give that part a cosmetic thread. **None** leaves a plain shank. |
 | Thread pitch | Coarse, or a fine pitch of the size (M8 and up). |
 | Left-hand thread | A thread that tightens anticlockwise. |
-| 3D print fit | Makes the part to be printed: a screw's thread and shank are smaller, a nut's thread larger and the drive recess wider, each by the **Clearance per side** (0.15 mm when left empty). Printers differ; print one and adjust the clearance. |
+| Flip | Turns the part over where it is placed: in a hole, the head goes in from the other way. |
 | Seating joint | Once a hole is picked: how the part is held in it. **Fixed in place** (a rigid joint) is the default. **Turns in place**, **Turns and slides** and **Screws in and out** leave the part its motion about and along the hole, for a mechanism or an animation: a part that screws in travels one pitch for each turn of its joint. **Slides over the face** seats the part on the face and leaves it free to slide, as a screw in a slot. |
 
 The live preview shows the part in place with a cosmetic thread; OK cuts a modeled one.
