@@ -4428,7 +4428,7 @@ mod tests {
         let pattern = doc
             .add_feature(
                 FeatureKind::Pattern {
-                    body_names: None,
+                    body_name_template: None,
                     features: Vec::new(),
                     pattern: crate::PatternKind::Rectangular {
                         dir1: crate::Dir(Vec3::X),

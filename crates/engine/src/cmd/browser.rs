@@ -1970,9 +1970,9 @@ pub(super) fn rename_one(s: &mut Session, cmd: &str, given: &str, name: &str) ->
     // Read the feature's own result so siblings removed by later features keep their names too.
     // Check the producer, even when later operations have modified this copy.
     if let Some(f) = s.doc.features.iter().find(|f| {
-        matches!(&f.kind, FeatureKind::Pattern { body_names: Some(_), .. })
+        matches!(&f.kind, FeatureKind::Pattern { body_name_template: Some(_), .. })
             && s.model.result(f.id).is_some_and(|r| r.state.bodies.iter().any(|b| b.feature == f.id && b.name == old))
-    }) && let FeatureKind::Pattern { body_names: Some(template), .. } = &f.kind
+    }) && let FeatureKind::Pattern { body_name_template: Some(template), .. } = &f.kind
     {
         return Err(bad(
             cmd,

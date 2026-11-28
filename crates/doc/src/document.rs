@@ -1333,8 +1333,8 @@ pub enum FeatureKind {
     Pattern {
         /// Optional template for copy names; the original keeps its name. The saved key
         /// differs from the feature's legacy list of pinned body names.
-        #[serde(default, rename = "body_name_template", skip_serializing_if = "Option::is_none")]
-        body_names: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_name_template: Option<String>,
         features: Vec<FeatureId>,
         pattern: PatternKind,
         /// Copy these bodies (as new bodies) instead of replaying features.

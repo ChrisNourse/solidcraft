@@ -3321,18 +3321,6 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, format!("`{cid}` does not make a feature")));
     }
     let mut params = p.get("params").cloned().unwrap_or_else(|| json!({}));
-    if matches!(cid, "solid.pattern.rectangular" | "solid.pattern.circular" | "solid.pattern.path")
-        && let Some(parameters) = params.as_object_mut()
-        && let Some(template) = parameters.remove("body_name_template")
-    {
-        if !template.as_str().is_some_and(|value| !value.trim().is_empty()) {
-            return Err(bad(cmd, "body_name_template must be a nonempty string"));
-        }
-        if parameters.get("body_names").is_some_and(|value| value != &template) {
-            return Err(bad(cmd, "body_names and body_name_template must agree"));
-        }
-        parameters.insert("body_names".into(), template);
-    }
     let idx = s.doc.feature_index(id).ok_or_else(|| bad(cmd, "feature"))?;
     let old = s.doc.feature(id).cloned().ok_or_else(|| bad(cmd, "feature"))?;
     if let FeatureKind::Extrude { extent, .. } | FeatureKind::SurfaceExtrude { extent, .. } = &old.kind

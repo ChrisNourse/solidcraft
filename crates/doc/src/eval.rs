@@ -15528,21 +15528,21 @@ fn pattern_bodies(
     // Validate every intended name before copying anything. Templates bypass stored legacy
     // names so growing and shrinking a pattern cannot change a survivor's name.
     let template = match &f.kind {
-        FeatureKind::Pattern { body_names, join, .. } => {
-            if body_names.is_some() && *join {
-                return Err(DocError::Invalid("body_names requires separate body copies (join: false)".into()));
+        FeatureKind::Pattern { body_name_template, join, .. } => {
+            if body_name_template.is_some() && *join {
+                return Err(DocError::Invalid("body_name_template requires separate body copies (join: false)".into()));
             }
-            body_names.as_deref()
+            body_name_template.as_deref()
         }
         _ => None,
     };
     let mut template_names = Vec::new();
     if let Some(template) = template {
         if template.trim().is_empty() {
-            return Err(DocError::Invalid("body_names must be a nonempty string".into()));
+            return Err(DocError::Invalid("body_name_template must be a nonempty string".into()));
         }
         if bodies.len().saturating_mul(mats.len()) > 1 && !template.contains("{i}") {
-            return Err(DocError::Invalid("body_names must contain {i} when creating more than one copy".into()));
+            return Err(DocError::Invalid("body_name_template must contain {i} when creating more than one copy".into()));
         }
         let mut taken: std::collections::HashSet<String> = st.bodies.iter().map(|b| b.name.clone()).collect();
         for i in 1..=bodies.len().saturating_mul(mats.len()) {
@@ -20805,9 +20805,9 @@ fn eval_feature_kind(
             }
             Ok(())
         }
-        FeatureKind::Pattern { features, pattern, bodies, placements, components, join, body_names, .. } => {
-            if body_names.is_some() && (bodies.is_empty() || !components.is_empty() || *join) {
-                return Err(DocError::Invalid("body_names requires separate body copies (join: false)".into()));
+        FeatureKind::Pattern { features, pattern, bodies, placements, components, join, body_name_template, .. } => {
+            if body_name_template.is_some() && (bodies.is_empty() || !components.is_empty() || *join) {
+                return Err(DocError::Invalid("body_name_template requires separate body copies (join: false)".into()));
             }
             // Component placements are reconciled on the document after evaluation (#12116).
             if !components.is_empty() {

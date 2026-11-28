@@ -2377,7 +2377,7 @@ fn copy_lineage_resolves_seed_material_and_respects_overrides() {
     let pat_id = doc
         .add_feature(
             FeatureKind::Pattern {
-                body_names: None,
+                body_name_template: None,
                 features: Vec::new(),
                 pattern: PatternKind::Rectangular {
                     dir1: crate::points::Dir(Vec3::X),
@@ -2457,7 +2457,7 @@ fn copy_lineage_resolves_seed_material_and_respects_overrides() {
     let join_id = doc
         .add_feature(
             FeatureKind::Pattern {
-                body_names: None,
+                body_name_template: None,
                 features: Vec::new(),
                 pattern: PatternKind::Rectangular {
                     dir1: crate::points::Dir(Vec3::X),
@@ -5595,7 +5595,7 @@ fn capture_position_20644_isolation_for_to_object_mirror_pattern_plane_and_joint
     let pattern_pre = doc
         .add_feature(
             FeatureKind::Pattern {
-                body_names: None,
+                body_name_template: None,
                 features: Vec::new(),
                 pattern: PatternKind::Rectangular {
                     dir1: crate::points::Dir(Vec3::Y),
