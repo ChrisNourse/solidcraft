@@ -6,24 +6,27 @@
 //! directions (A. Laurentini, "The visual hull concept for silhouette-based image understanding",
 //! IEEE PAMI 16(2), 1994). The hull is the solid when it holds no more material. The solid built
 //! is the first extrusion less the holes of the others' sections, which holds their
-//! intersection. It is taken only when every source vertex lies inside every extrusion, every
-//! source triangle is a cap triangle of the first extrusion or lies whole within the tolerance
-//! of one of its walls or of a hole's wall of a later one (the chord certificate of
-//! [`super::curves`]): so the source lies on the built solid's boundary; and the volumes agree
-//! within the tolerance times the source's area. A kernel failure status while building or
-//! measuring it keeps the source's facets, which the step only replaces ([`Refused::Failed`]).
+//! intersection. It is taken only when every hole of every section is one circle and the first
+//! section is one region with a convex outline; every source vertex lies inside every
+//! extrusion; every source triangle is a cap triangle of the first extrusion or lies whole
+//! within the tolerance of one of its walls or of a hole's wall of a later one (the chord
+//! certificate of [`super::curves`]), and keeps out of every hole but for the tolerance along
+//! its wall, which a triangle on one wall can cross with all its corners outside: so the
+//! source lies on the built solid's boundary; and the volumes agree within the tolerance times
+//! the source's area. A kernel failure status while building or measuring it keeps the
+//! source's facets, which the step only replaces ([`Refused::Failed`]).
 //!
 //! Deviations: no upstream counterpart. No recursion.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
 use crate::kernel::Kernel;
-use crate::math::{det, Vec3};
+use crate::math::{det, Vec2, Vec3};
 use crate::prism::profile::{Loop2, Region2, Seg2};
 use crate::{Brep, Result, SolidError};
 
 use super::curves::certified;
-use super::geometry::{distance_to_segment, MeshPlane};
+use super::geometry::{distance_to_segment, MeshPlane, PlanarVector};
 use super::parts::{self, MAX_FACES};
 use super::{invalid, native, prism, Prism, Sides, TriMesh, MAX_WALL_WORK};
 
@@ -95,6 +98,20 @@ fn candidate(k: &mut Kernel, mesh: &TriMesh, tolerance: f64) -> Result<Option<Br
     if samples.saturating_mul(segments) > MAX_WALL_WORK {
         return Ok(None);
     }
+    // The tests below hold a triangle in the built solid for these sections only: a convex
+    // first outline holds every triangle whose corners it holds, and a circle's inside less the
+    // tolerance is a disk a triangle can be measured against.
+    let straight = epsilon / size.max(1.);
+    let sections_fit = prisms.first().is_some_and(
+        |first| matches!(first.regions.as_slice(), [region] if convex(&region.outer, straight)),
+    ) && prisms
+        .iter()
+        .flat_map(|p| &p.regions)
+        .flat_map(|region| &region.holes)
+        .all(|hole| circle(hole).is_some());
+    if !sections_fit {
+        return Ok(None);
+    }
     k.check_cancelled("reconstruct mesh")?;
     for &p in &mesh.positions {
         k.check_cancelled("reconstruct mesh")?;
@@ -126,6 +143,15 @@ fn candidate(k: &mut Kernel, mesh: &TriMesh, tolerance: f64) -> Result<Option<Br
                 .iter()
                 .skip(1)
                 .any(|prism| bounds(prism, corners, tolerance, Bound::Holes))
+        {
+            return Ok(None);
+        }
+        // A wall triangle runs along its own axis and can cross another extrusion's hole with
+        // its corners outside it, as the wall of a bore over a web the next bore does not cut:
+        // the solid built below has no material there.
+        if !prisms
+            .iter()
+            .all(|prism| clear_of_holes(prism, corners, tolerance))
         {
             return Ok(None);
         }
@@ -219,6 +245,79 @@ fn inside(prism: &Prism, p: Vec3, tolerance: f64) -> bool {
         }
     }
     held
+}
+
+/// The centre and radius of a hole that is one full circle, as [`super::prism`] fits a bore.
+fn circle(hole: &Loop2) -> Option<(Vec2, f64)> {
+    match hole.segs.as_slice() {
+        [Seg2::Arc {
+            center,
+            radius,
+            sweep,
+            ..
+        }] if sweep.abs() >= TAU => Some((*center, *radius)),
+        _ => None,
+    }
+}
+
+/// Whether the loop turns one way only, a turn by less than `straight` (its sine) not counting:
+/// the outline of a convex section, which holds the segment between any two points it holds.
+fn convex(outline: &Loop2, straight: f64) -> bool {
+    // A segment's direction where it starts and ends, and which way it turns between.
+    let tangent =
+        |angle: f64, sweep: f64| Vec2::new(-det::sin(angle), det::cos(angle)) * sweep.signum();
+    let mut ends = Vec::new();
+    for seg in &outline.segs {
+        match *seg {
+            Seg2::Line { a, b } => {
+                let Some(along) = (b - a).normalized() else {
+                    return false;
+                };
+                ends.push((along, along, 0.));
+            }
+            Seg2::Arc { start, sweep, .. } => {
+                ends.push((tangent(start, sweep), tangent(start + sweep, sweep), sweep));
+            }
+            _ => return false,
+        }
+    }
+    let mut turns = ends.iter().map(|end| end.2).collect::<Vec<_>>();
+    turns.extend(
+        ends.iter()
+            .zip(ends.iter().cycle().skip(1))
+            .map(|(before, after)| before.1.cross(after.0))
+            .filter(|turn| turn.abs() > straight),
+    );
+    turns.iter().all(|&t| t >= 0.) || turns.iter().all(|&t| t <= 0.)
+}
+
+/// Whether the triangle, seen along the extrusion's axis, keeps out of each of its section's
+/// holes (one circle each) but for `tolerance` inside the circle.
+fn clear_of_holes(prism: &Prism, corners: [Vec3; 3], tolerance: f64) -> bool {
+    let projected = corners.map(|p| prism.plane.to_local(p));
+    prism
+        .regions
+        .iter()
+        .flat_map(|region| &region.holes)
+        .all(|hole| {
+            circle(hole).is_some_and(|(center, radius)| {
+                distance_to_triangle(&projected, center) >= radius - tolerance
+            })
+        })
+}
+
+/// The distance from `point` to the triangle `corners`, zero on or inside it.
+fn distance_to_triangle(corners: &[Vec2; 3], point: Vec2) -> f64 {
+    let [a, b, c] = *corners;
+    let sides = [(a, b), (b, c), (c, a)];
+    let turns = sides.map(|(from, to)| (to - from).cross(point - from));
+    if turns.iter().all(|&t| t >= 0.) || turns.iter().all(|&t| t <= 0.) {
+        return 0.;
+    }
+    sides
+        .iter()
+        .map(|&(a, b)| distance_to_segment(&Seg2::Line { a, b }, point))
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Which part of an extrusion's boundary a triangle may lie on.
