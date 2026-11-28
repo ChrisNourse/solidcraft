@@ -25,7 +25,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wgpu: egui_wgpu::WgpuConfiguration::default(),
         renderer: egui_wgpu::RendererOptions::default(),
         transparent: false,
+        event_loop_builder: None,
+        window_settings: None,
     };
-    run(options, Demo { clicks: 0 })?;
+    run(options, |_| Box::new(Demo { clicks: 0 }))?;
     Ok(())
 }

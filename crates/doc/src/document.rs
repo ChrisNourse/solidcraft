@@ -2410,6 +2410,12 @@ pub enum FeatureKind {
         /// Corner choices for these flanges, identified by their named source rims.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         corners: Vec<crate::CornerJoinParams>,
+        /// How far each bend is moved out past where `position` puts it, away from the panel it
+        /// stands on (toward it where negative); the panel grows by the same strip. None is no
+        /// offset. Walked last, so the inputs before it keep their names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Offset")]
+        offset: Option<Expr>,
     },
     /// A corner shared by two bends, saved by their source-edge identities.
     SheetCornerJoin {
@@ -3532,7 +3538,10 @@ pub enum FilletStyle {
 /// A fillet radius too large for the geometry around its edges: refused (`Exact`, the default),
 /// reduced to the largest that works for all of them (`Reduce`), or tapered along each edge it
 /// doesn't fit to the room there, down to zero where a face closes to a point (`Taper`); a
-/// warning says what was done.
+/// warning says what was done. `KeepEdge` is for a concave round taller than the wall it rises
+/// on: it ends on the wall's top edge, tangent to the floor only, so the top face and its edge
+/// stay as they are, instead of carrying the wall's plane on and growing the top face to meet
+/// the round; every other edge is rounded as usual.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilletFit {
@@ -3540,6 +3549,7 @@ pub enum FilletFit {
     Exact,
     Reduce,
     Taper,
+    KeepEdge,
 }
 
 impl FilletFit {

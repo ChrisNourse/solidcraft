@@ -855,6 +855,9 @@ fn fillet_fitted(
 ) -> std::result::Result<(kernel::Body, Option<Vec<f64>>, Vec<Vec3>), kernel::KernelError> {
     #[cfg(test)]
     cost_tests::count(|c| c.blends += 1);
+    if fit == crate::FilletFit::KeepEdge {
+        return kernel::fillet_keep_edge(body, edges, r).map(|b| (b, None, Vec::new()));
+    }
     match kernel::fillet_removing(body, edges, r, turn) {
         Ok((b, gone)) => Ok((b, None, gone)),
         // SMLib's refusal already computes the largest fitting radius from the cause's own
@@ -1110,10 +1113,25 @@ fn law_by_law(
     }
 }
 
-/// `Posts` for `Posts (1)`: the body a split piece was numbered after.
-fn split_piece_of(name: &str) -> Option<&str> {
+/// `Posts` and `1` for `Posts (1)`: the body a split piece was numbered after, and that number.
+fn split_piece_of(name: &str) -> Option<(&str, u32)> {
     let (base, n) = name.strip_suffix(')')?.rsplit_once(" (")?;
-    (!n.starts_with('0') && n.parse::<u32>().is_ok()).then_some(base)
+    if n.starts_with('0') {
+        return None;
+    }
+    Some((base, n.parse().ok()?))
+}
+
+/// Whether `body` still holds the extra piece a cut numbered `n` (`(1)`, `(2)`, …).
+/// That index is inside only when it is at least 1 and below the material-region count.
+/// A mesh body has none of those pieces.
+fn numbered_piece_in(body: &Body, n: u32) -> bool {
+    if body.is_mesh() {
+        return false;
+    }
+    let regions = body.record().material_regions().len();
+    let Ok(n) = usize::try_from(n) else { return false };
+    (1..regions).contains(&n)
 }
 
 /// The warning of a sketch whose profile search was cut short (#6896).
@@ -2939,6 +2957,12 @@ fn chain_fingerprint(
         turns.hash(&mut h);
         fp = h.finish();
     }
+    if let Some(suppressed) = blend_suppressed_makers_digest(doc, f) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        fp.hash(&mut h);
+        suppressed.hash(&mut h);
+        fp = h.finish();
+    }
     // A pattern or mirror of features replays its sources' definitions wherever they are in the
     // timeline. One made with the timeline rolled back comes before them, where the chain doesn't
     // cover them: its copies kept the size the sources had when they were made.
@@ -3757,6 +3781,7 @@ impl EvalKey {
             ^ placement_digest(doc, f, Some(st))
             ^ construct_digest(doc, vals, f, Some(st), constructions)
             ^ turns_digest(doc, vals, f).unwrap_or(0)
+            ^ blend_suppressed_makers_digest(doc, f).unwrap_or(0)
             ^ depth_digest(st);
         let reached = components.reachable_digest(doc, f, st);
         let whole = cache_key(f, fp, local, ctx ^ reached, st);
@@ -4300,10 +4325,17 @@ impl Feature {
                 read.sketches.dedup();
                 Some(read)
             }
-            FeatureKind::Fillet { edges, body, .. } | FeatureKind::Chamfer { edges, body, .. } => match body {
-                Some(n) => bodies(named(std::slice::from_ref(&n.0))?),
-                None => bodies(blend_candidates(st, &crate::plain(edges))?),
-            },
+            FeatureKind::Fillet { edges, body, .. } | FeatureKind::Chamfer { edges, body, .. } => {
+                // A blend whose stored names reference a suppressed upstream feature depends on
+                // whether that feature is suppressed versus deleted, not only on the live bodies.
+                if blend_suppressed_makers_digest(doc, self).is_some() {
+                    return None;
+                }
+                match body {
+                    Some(n) => bodies(named(std::slice::from_ref(&n.0))?),
+                    None => bodies(blend_candidates(st, &crate::plain(edges))?),
+                }
+            }
             // A new body through curves of one sketch of its component: an edit of another
             // sketch leaves it as it was (#17714: a delete in a later sketch rebuilt a patch
             // whose edge tolerances take most of a second to prove, twice per check).
@@ -8507,6 +8539,13 @@ fn draft_corner_for(ss: &SolvedSketch, r: &Region2, distance: f64, taper: f64, n
     })
 }
 
+/// The point an Emboss turns its picked profiles about: the middle of the bounds of `regions`, in
+/// the sketch's coordinates. The Emboss marker in the view stands where it lands, moved by the
+/// offsets.
+pub fn emboss_middle(regions: &[Region2]) -> Vec2 {
+    crate::frame::anchor_point(regions, crate::frame::Anchor::Center)
+}
+
 /// The profiles an Emboss lays on its face (#20386): `regions`, as [`select_profiles`] gives them,
 /// turned `angle` radians counter-clockwise about the middle of their bounds and then moved by
 /// `shift`, all in the sketch's coordinates, so the shift runs along the sketch's x and y whatever
@@ -8525,12 +8564,22 @@ pub fn emboss_placement(regions: Vec<Region2>, shift: Vec2, angle: f64) -> Resul
     // A point p goes to R (p − middle) + middle + shift, which is R p + (shift + middle − R middle).
     let mut to = shift;
     if angle != 0.0 {
-        let middle = crate::frame::anchor_point(&regions, crate::frame::Anchor::Center);
+        let middle = emboss_middle(&regions);
         to += middle - solidcraft_geom::Similarity2::new(1.0, angle, Vec2::ZERO).ok_or_else(out_of_range)?.apply(middle);
     }
     let by = solidcraft_geom::Similarity2::new(1.0, angle, to).ok_or_else(out_of_range)?;
     let placed = |l: &solidcore_record::Loop2| solidcore_record::Loop2 { segs: l.segs.iter().map(|s| s.similar(&by)).collect() };
     Ok(regions.iter().map(|r| Region2 { outer: placed(&r.outer), holes: r.holes.iter().map(placed).collect() }).collect())
+}
+
+/// The box round an Emboss's picked profiles where the build puts it: the bounds of `regions`,
+/// turned and moved exactly as [`emboss_placement`] turns and moves the profiles themselves. Its
+/// four corners in the sketch's coordinates, in order round the box from the one that was lowest;
+/// none without a profile. The Emboss handles outline it while they drag.
+pub fn emboss_box(regions: &[Region2], shift: Vec2, angle: f64) -> Result<Vec<Vec2>> {
+    let Some((lo, hi)) = crate::frame::profile_bounds(regions) else { return Ok(Vec::new()) };
+    let bounds = Region2 { outer: solidcore_record::Loop2::polygon(&[lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)]), holes: Vec::new() };
+    Ok(emboss_placement(vec![bounds], shift, angle)?.iter().flat_map(|r| r.outer.segs.iter().map(|s| s.start())).collect())
 }
 
 pub fn select_profiles(ss: &SolvedSketch, sel: &ProfileSel) -> Result<Vec<Region2>> {
@@ -10619,20 +10668,58 @@ fn pick_lies_on_a_round_axis(body: &Body, p: Vec3) -> bool {
     }
 }
 
-/// Edge reference points re-found on the body: points on an edge stay; a point that moved off
-/// (an upstream edit) is carried with the body (its place in the body's bounding box then and
-/// now) to an edge running the same way; failing that it goes to the nearest edge with a
-/// warning; points with no edge near are dropped with a warning.
-fn resolve_edges(b: &Body, pts: &[Vec3], refs: &[EdgeRef], warning: &mut Option<String>) -> Result<Vec<Vec3>> {
+/// Whether two axis-aligned bounding boxes overlap within `slack`.
+fn boxes_overlap(a_min: Vec3, a_max: Vec3, b_min: Vec3, b_max: Vec3, slack: f64) -> bool {
+    a_min.x - slack <= b_max.x
+        && a_max.x + slack >= b_min.x
+        && a_min.y - slack <= b_max.y
+        && a_max.y + slack >= b_min.y
+        && a_min.z - slack <= b_max.z
+        && a_max.z + slack >= b_min.z
+}
+
+/// How far from an edge of a body this big a pick still means it: matches the kernel's
+/// `blend_smlib::pick_tolerance` and the engine command's `features::edge_reach`.
+fn blend_edge_reach(size: f64) -> f64 {
+    size * 0.05 + 1e-3
+}
+
+/// How far `p` is from the nearest edge of `b`, when within [`blend_edge_reach`].
+fn edge_within_reach(b: &ModelBody, p: Vec3) -> Option<f64> {
+    if b.body.is_mesh() {
+        return None;
+    }
+    let size = b.body.size();
+    let (_, d) = b.body.nearest_edge(p, (size * 1e-3).max(1e-3)).ok()??;
+    (d <= blend_edge_reach(size)).then_some(d)
+}
+
+/// Edge reference points re-found on the body, preserving each kept pick's index in `pts`: points
+/// on an edge stay; a point that moved off (an upstream edit on the same body) is carried with the
+/// body (its place in the body's bounding box then and now) to an edge running the same way when
+/// the body still overlaps its saved box; a point within [`blend_edge_reach`] takes that edge;
+/// when `allow_nearest` is set (an unnamed blend pinned to an explicit target body, or when its
+/// body is the only solid body), a pick with a unique nearest edge within a quarter of the body
+/// diagonal follows it with a warning. Otherwise points with no matching edge are skipped with a
+/// warning, never moved onto an unrelated edge.
+fn resolve_edges(b: &Body, pts: &[Vec3], refs: &[Option<&EdgeRef>], allow_nearest: bool, warning: &mut Option<String>) -> Result<Vec<(usize, Vec3)>> {
     let size = b.size();
     let edges = b.edges((size * 1e-3).max(1e-3))?;
     let tight = (size * 2e-3).max(1e-3);
+    let reach = blend_edge_reach(size);
     let dist = |p: Vec3, e: &kernel::EdgeInfo| e.points.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min);
     let now = b.mesh(&solidcraft_kernel::MeshTolerance::chord((size * 1e-2).max(1e-2))).map(|m| m.bounds()).ok();
-    let (mut out, mut moved, mut lost) = (Vec::new(), 0, 0);
-    for (i, p) in pts.iter().enumerate() {
-        let on = edges.iter().any(|e| dist(*p, e) <= tight);
-        if !on && let (Some(r), Some(nb)) = (refs.get(i), now.as_ref()) {
+    let (mut out, mut moved, mut lost) = (Vec::new(), 0usize, 0usize);
+    for (k, &p) in pts.iter().enumerate() {
+        let on = edges.iter().any(|e| dist(p, e) <= tight);
+        if on {
+            out.push((k, p));
+            continue;
+        }
+        if let (Some(Some(r)), Some(nb)) = (refs.get(k), now.as_ref())
+            && in_ref_box(r, p)
+            && boxes_overlap(r.min, r.max, nb.min, nb.max, tight)
+        {
             // The same place in the body as it is now.
             let map = |v: f64, a0: f64, a1: f64, b0: f64, b1: f64| {
                 if (a1 - a0).abs() > 1e-9 { b0 + (v - a0) * (b1 - b0) / (a1 - a0) } else { v + (b0 - a0) }
@@ -10647,18 +10734,27 @@ fn resolve_edges(b: &Body, pts: &[Vec3], refs: &[EdgeRef], warning: &mut Option<
                 dist(q, e) <= tight && (r.dir.len() < 0.5 || d.cross(r.dir).len() < 1e-3)
             };
             if edges.iter().any(fits) {
-                out.push(q);
+                out.push((k, q));
                 continue;
             }
         }
-        let best = edges
-            .iter()
-            .map(|e| (e.points.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min), e.mid))
-            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let mut best: Option<(f64, Vec3)> = None;
+        let mut second = f64::INFINITY;
+        for e in &edges {
+            let d = dist(p, e);
+            if best.is_none_or(|(bd, _)| d < bd) {
+                if let Some((bd, _)) = best {
+                    second = second.min(bd);
+                }
+                best = Some((d, e.mid));
+            } else if d < second {
+                second = d;
+            }
+        }
         match best {
-            Some((d, _)) if d <= tight => out.push(*p),
-            Some((d, mid)) if d <= size * 0.25 => {
-                out.push(mid);
+            Some((d, mid)) if d <= reach => out.push((k, mid)),
+            Some((d, mid)) if allow_nearest && d <= size * 0.25 && d + tight < second => {
+                out.push((k, mid));
                 moved += 1;
             }
             _ => lost += 1,
@@ -10680,28 +10776,46 @@ fn resolve_edges(b: &Body, pts: &[Vec3], refs: &[EdgeRef], warning: &mut Option<
     Ok(out)
 }
 
-/// The body a fillet/chamfer applies to: by name, or the one closest to the first edge point.
+fn no_solid_body_error(state: &ModelState) -> DocError {
+    if state.bodies.iter().any(|b| b.body.is_mesh()) {
+        DocError::Invalid("there is no solid body to modify (mesh bodies have no edges)".into())
+    } else {
+        DocError::Invalid("there is no body to modify".into())
+    }
+}
+
+/// The body a fillet/chamfer applies to: by name, or the solid body with an edge within
+/// [`blend_edge_reach`] of the first edge point, or the sole solid body when only one exists.
+/// Never jumps to an unrelated distant body when several solid bodies exist and none has an edge
+/// within pick reach.
 pub fn blend_target(state: &ModelState, body: &Option<crate::BodyName>, edges: &[Vec3]) -> Result<usize> {
     if let Some(n) = body {
         return state.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")));
     }
     let p = edges.first().ok_or_else(|| DocError::Invalid("no edges selected".into()))?;
+    let mut solid_count = 0usize;
+    let mut sole_solid = 0usize;
     let mut best: Option<(usize, f64)> = None;
     for (i, b) in state.bodies.iter().enumerate() {
-        let tol = (b.body.size() * 2e-3).max(1e-3);
-        if let Ok(Some((_, d))) = b.body.nearest_edge(*p, tol)
+        if b.body.is_mesh() {
+            continue;
+        }
+        solid_count += 1;
+        sole_solid = i;
+        if let Some(d) = edge_within_reach(b, *p)
             && best.is_none_or(|(_, bd)| d < bd)
         {
             best = Some((i, d));
         }
     }
-    best.map(|(i, _)| i).ok_or_else(|| {
-        if state.bodies.iter().any(|b| b.body.is_mesh()) {
-            DocError::Invalid("there is no solid body to modify (mesh bodies have no edges)".into())
-        } else {
-            DocError::Invalid("there is no body to modify".into())
-        }
-    })
+    if let Some((i, _)) = best {
+        return Ok(i);
+    }
+    match solid_count {
+        0 => Err(no_solid_body_error(state)),
+        1 => Ok(sole_solid),
+        _ => Err(DocError::Invalid("none of the selected edges exist any more".into())),
+    }
 }
 
 /// Whether `p` lies in the bounding box a reference recorded (with a little slack): an edge
@@ -10725,24 +10839,130 @@ fn trusted_edge_name(f: &Feature, i: usize, p: Vec3) -> Option<&str> {
     }
 }
 
-/// The body (index) an edge name finds an edge on, when one does: the one where the edge still
-/// runs through the pick `p`, else the nearest.
+/// The upstream feature ids that directly made the faces of edge name `name`: each face's base
+/// maker, nested blend/inner makers, and copy feature (`@F<n>.<k>`), excluding piece qualifiers
+/// (`#[...]`) which only name neighbouring splitters rather than the face's own makers.
+fn edge_maker_ids(name: &str) -> Vec<u64> {
+    use crate::persistent_name::{Base, EdgeName, FaceName, Rounds, Suffix};
+    fn push_face(face: &FaceName, out: &mut Vec<u64>) {
+        match &face.base {
+            Base::Made { feature, .. } | Base::Blend { feature, rounds: Rounds::Index(_) } => out.push(feature.0),
+            Base::Blend { feature, rounds: Rounds::Edge(edge) } => {
+                out.push(feature.0);
+                for f in &edge.faces {
+                    push_face(f, out);
+                }
+            }
+            Base::Inner { feature, offsets } => {
+                out.push(feature.0);
+                push_face(offsets, out);
+            }
+            Base::BodyFace { .. } | Base::Other(_) => {}
+        }
+        for s in &face.suffixes {
+            if let Suffix::Copy { feature, .. } = s {
+                out.push(feature.0);
+            }
+        }
+    }
+    let bare = crate::naming::legacy_name(name).unwrap_or(name);
+    let mut ids = Vec::new();
+    if let Ok(edge) = EdgeName::parse(bare) {
+        for face in &edge.faces {
+            push_face(face, &mut ids);
+        }
+    } else {
+        for part in bare.split('|') {
+            if let Some(id) = crate::persistent_name::made_by(part) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Names of suppressed features before `f` in `doc` that directly made the faces of `edge_name`.
+fn suppressed_edge_makers<'a>(doc: &'a Document, f: &Feature, edge_name: &str) -> Vec<&'a str> {
+    let ids = edge_maker_ids(edge_name);
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    doc.features.iter().take_while(|g| g.id != f.id).filter(|g| g.suppressed && ids.contains(&g.id)).map(|g| g.name.as_str()).collect()
+}
+
+/// Name of a suppressed feature before `f` in `doc` whose stored body names include `body_name`.
+fn suppressed_body_maker<'a>(doc: &'a Document, f: &Feature, body_name: &str) -> Option<&'a str> {
+    let target = body_name.trim();
+    doc.features
+        .iter()
+        .take_while(|g| g.id != f.id)
+        .find(|g| g.suppressed && g.body_names.iter().any(|n| n.trim() == target))
+        .map(|g| g.name.as_str())
+}
+
+/// Digest of suppressed upstream features directly referenced by a Fillet or Chamfer's stored
+/// edge/body names. Returns `None` when none are suppressed so normal timelines keep identical
+/// cache keys; when a referenced maker transitions between suppressed and deleted (or is renamed
+/// while suppressed), the key changes so cached suppressed warnings are invalidated.
+fn blend_suppressed_makers_digest(doc: &Document, f: &Feature) -> Option<u64> {
+    let (FeatureKind::Fillet { body, .. } | FeatureKind::Chamfer { body, .. }) = &f.kind else {
+        return None;
+    };
+    if !doc.features.iter().take_while(|g| g.id != f.id).any(|g| g.suppressed) {
+        return None;
+    }
+    let mut any = false;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "blend-suppressed-makers".hash(&mut h);
+    if let Some(n) = body
+        && let Some(maker) = suppressed_body_maker(doc, f, &n.0)
+    {
+        any = true;
+        0u8.hash(&mut h);
+        maker.hash(&mut h);
+    }
+    for (i, n) in f.edge_names.iter().enumerate() {
+        if n.is_empty() {
+            continue;
+        }
+        let makers = suppressed_edge_makers(doc, f, n);
+        if !makers.is_empty() {
+            any = true;
+            1u8.hash(&mut h);
+            i.hash(&mut h);
+            makers.hash(&mut h);
+        }
+    }
+    any.then(|| h.finish())
+}
+
+/// The body (index) an edge name finds an edge on, when one does: the unique body holding that
+/// named edge, or when several copies share the same face names, the unique copy whose matching
+/// edge still runs through `p`. Never guesses between ambiguous copies by nearest distance.
 fn named_body(st: &ModelState, name: &str, p: Vec3) -> Option<usize> {
     // Names start with the feature that made the face: only bodies with such a face can hold it.
     let bare = crate::naming::legacy_name(name).unwrap_or(name);
     let token = bare.find(':').map(|k| &bare[..=k]);
-    let mut best: Option<(usize, (bool, f64))> = None;
+    let mut hits: Vec<(usize, bool)> = Vec::new();
     for (i, b) in st.bodies.iter().enumerate() {
         if b.body.is_mesh() || token.is_some_and(|t| !crate::naming::face_names(b).iter().any(|n| n.contains(t))) {
             continue;
         }
-        let Ok(hit) = crate::name_lookup::locate_projected_edge(b, name, p) else { continue };
-        let score = (hit.on_point, -hit.point.dist(p));
-        if best.as_ref().is_none_or(|(_, s)| score.partial_cmp(s).is_some_and(|o| o.is_gt())) {
-            best = Some((i, score));
+        if let Ok(hit) = crate::name_lookup::locate_projected_edge(b, name, p) {
+            hits.push((i, hit.on_point));
+        } else if crate::name_lookup::recover_split_closed_edge(b, name, p).is_some() {
+            hits.push((i, true));
         }
     }
-    best.map(|(i, _)| i)
+    match hits.as_slice() {
+        [(i, _)] => Some(*i),
+        _ => {
+            let mut on = hits.into_iter().filter_map(|(i, on)| on.then_some(i));
+            on.next().filter(|_| on.next().is_none())
+        }
+    }
 }
 
 /// The body (index) an edge picked at `p` lies on: the body with an edge through it.
@@ -10750,11 +10970,11 @@ fn body_on_edge(st: &ModelState, p: Vec3) -> Option<usize> {
     st.bodies.iter().enumerate().filter_map(|(i, b)| Some((i, edge_through(b, p)?))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
 }
 
-/// The body (index) an edge picked at `p` without a name lies on, as [`body_on_edge`], and the note
-/// when `p` lies on edges of other bodies too: every body with an edge through `p` about as near
+/// The body (index) an edge picked at `p` without a name lies on (within [`blend_edge_reach`]),
+/// and the note when `p` lies on edges of other bodies too: every body with an edge about as near
 /// as the nearest one, the window the `solid.fillet` command refuses such a pick with (#20517).
 fn body_on_edge_noted(st: &ModelState, p: Vec3) -> (Option<usize>, Option<String>) {
-    let near: Vec<(usize, f64)> = st.bodies.iter().enumerate().filter_map(|(i, b)| Some((i, edge_through(b, p)?))).collect();
+    let near: Vec<(usize, f64)> = st.bodies.iter().enumerate().filter_map(|(i, b)| Some((i, edge_within_reach(b, p)?))).collect();
     let Some(&(chosen, d_min)) = near.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return (None, None) };
     let mut names: Vec<&str> =
         near.iter().filter(|(_, d)| *d <= 2.0 * d_min + 1e-3).filter_map(|(i, _)| Some(st.bodies.get(*i)?.name.as_str())).collect();
@@ -10784,94 +11004,194 @@ fn edge_through(b: &ModelBody, p: Vec3) -> Option<f64> {
     (d <= (size * 2e-3).max(1e-3)).then_some(d)
 }
 
-/// The body (index) each edge of a blend is on: the named body; else, for each edge, the body
-/// its stored name finds it on. A named edge that is gone stays on the bodies the feature's other
-/// edges were found on; an unnamed one goes to the body the pick lies on an edge of; failing
-/// both, the body nearest the first pick (as before blends were split by body). A named edge is
-/// never moved onto another body because that body's edge is nearer. The notes say which
-/// unnamed picks lie on edges of several bodies: the `solid.fillet` and `solid.chamfer` commands
-/// refuse such a pick, so a design file that has one blends the nearest body, but says so (#20517).
-fn blend_bodies(st: &ModelState, f: &Feature, body: &Option<crate::BodyName>, pts: &[Vec3]) -> Result<(Vec<usize>, Vec<String>)> {
-    // Named, or only one body to blend: no lookup.
-    if body.is_some() || st.bodies.iter().filter(|b| !b.body.is_mesh()).count() < 2 {
-        let ti = blend_target(st, body, pts)?;
-        return Ok((vec![ti; pts.len()], Vec::new()));
+/// Where one edge pick of a blend resolves at the body level.
+#[derive(Clone)]
+enum BlendPickTarget {
+    /// Resolve this pick on `st.bodies[ti]`.
+    Body(usize),
+    /// This pick's direct upstream maker feature(s) are suppressed: skipped if other picks survive,
+    /// or reported as a suppressed-maker error if no picks remain (distinct from deleted/reselect).
+    Suppressed(Vec<String>),
+    /// An unnamed pick has no body with an edge at its point.
+    Lost,
+}
+
+/// The body (index) each edge of a blend resolves on: the named body (or waiting if its maker is
+/// suppressed); else, for each named edge, the body its stored name finds it on (never jumping to
+/// an unrelated body when the edge is missing or its maker is suppressed); for an unnamed edge, the
+/// body whose edge runs through the pick. The notes say which unnamed picks lie on edges of several
+/// bodies: the `solid.fillet` and `solid.chamfer` commands refuse such a pick, so a design file
+/// that has one blends the nearest body, but says so (#20517).
+fn blend_bodies(
+    doc: &Document,
+    st: &ModelState,
+    f: &Feature,
+    body: &Option<crate::BodyName>,
+    pts: &[Vec3],
+) -> Result<(Vec<BlendPickTarget>, Vec<String>, usize)> {
+    if pts.is_empty() {
+        if let Some(n) = body {
+            if st.bodies.iter().any(|b| &b.name == n) {
+                return Ok((Vec::new(), Vec::new(), 0));
+            }
+            if let Some(maker) = suppressed_body_maker(doc, f, &n.0) {
+                return Ok((vec![BlendPickTarget::Suppressed(vec![maker.to_string()])], Vec::new(), 0));
+            }
+            return Err(DocError::Unknown(format!("body `{n}`")));
+        }
+        return Err(DocError::Invalid("no edges selected".into()));
     }
-    let names: Vec<Option<&str>> = pts.iter().enumerate().map(|(i, p)| trusted_edge_name(f, i, *p)).collect();
-    let by_name: Vec<Option<usize>> = names.iter().zip(pts).map(|(n, p)| n.and_then(|n| named_body(st, n, *p))).collect();
-    let mut named: Vec<usize> = by_name.iter().flatten().copied().collect();
-    named.sort_unstable();
-    named.dedup();
-    // Of the bodies the feature's other edges were found on, the one with an edge nearest `p`.
-    let nearest_named = |p: Vec3| {
-        named
-            .iter()
-            .filter_map(|i| {
-                let b = st.bodies.get(*i)?;
-                let tol = (b.body.size() * 2e-3).max(1e-3);
-                Some((*i, b.body.nearest_edge(p, tol).ok()??.1))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    };
-    let mut fallback = None;
+    if let Some(n) = body {
+        if let Some(ti) = st.bodies.iter().position(|b| &b.name == n) {
+            return Ok((vec![BlendPickTarget::Body(ti); pts.len()], Vec::new(), 0));
+        }
+        if let Some(maker) = suppressed_body_maker(doc, f, &n.0) {
+            return Ok((vec![BlendPickTarget::Suppressed(vec![maker.to_string()]); pts.len()], Vec::new(), 0));
+        }
+        // Even if the upstream feature did not pin `body_names`, stored edge names identify its maker.
+        if f.edge_names.iter().any(|e| !e.is_empty()) {
+            let mut targets = Vec::with_capacity(pts.len());
+            let mut all_suppressed = true;
+            for (i, p) in pts.iter().enumerate() {
+                let Some(name) = trusted_edge_name(f, i, *p) else {
+                    all_suppressed = false;
+                    break;
+                };
+                let makers = suppressed_edge_makers(doc, f, name);
+                if makers.is_empty() {
+                    all_suppressed = false;
+                    break;
+                }
+                targets.push(BlendPickTarget::Suppressed(makers.into_iter().map(str::to_string).collect()));
+            }
+            if all_suppressed && targets.len() == pts.len() {
+                return Ok((targets, Vec::new(), 0));
+            }
+        }
+        return Err(DocError::Unknown(format!("body `{n}`")));
+    }
+    // Only one solid body to blend: no multi-body lookup needed. (Zero solid bodies still falls
+    // through when stored edge names exist so suppressed upstream makers are reported as such.)
+    let solid_count = st.bodies.iter().filter(|b| !b.body.is_mesh()).count();
+    if solid_count == 1 {
+        let ti = blend_target(st, body, pts)?;
+        return Ok((vec![BlendPickTarget::Body(ti); pts.len()], Vec::new(), 0));
+    }
+    let has_names = f.edge_names.iter().any(|n| !n.is_empty());
+    if !has_names {
+        if solid_count == 0 {
+            return Err(no_solid_body_error(st));
+        }
+        let mut out = Vec::with_capacity(pts.len());
+        let mut notes = Vec::new();
+        let mut lost = 0usize;
+        for &p in pts {
+            let (on, note) = body_on_edge_noted(st, p);
+            notes.extend(note);
+            match on {
+                Some(ti) => out.push(BlendPickTarget::Body(ti)),
+                None => {
+                    lost += 1;
+                    out.push(BlendPickTarget::Lost);
+                }
+            }
+        }
+        if lost == pts.len() {
+            return Err(DocError::Invalid("none of the selected edges exist any more".into()));
+        }
+        return Ok((out, notes, lost));
+    }
     let mut out = Vec::with_capacity(pts.len());
     let mut notes = Vec::new();
-    for ((b, n), p) in by_name.into_iter().zip(&names).zip(pts) {
-        let found = match (b, n) {
-            (Some(ti), _) => Some(ti),
-            // A named edge that is gone stays with the feature's other bodies: another body's
-            // edge where it was picked is not it.
-            (None, Some(_)) => nearest_named(*p).or_else(|| body_on_edge(st, *p)),
-            (None, None) => {
-                let (on, note) = body_on_edge_noted(st, *p);
-                notes.extend(note);
-                on.or_else(|| nearest_named(*p))
+    let mut lost = 0usize;
+    for (i, &p) in pts.iter().enumerate() {
+        if let Some(stored) = f.edge_names.get(i).filter(|n| !n.is_empty()) {
+            let Some(name) = trusted_edge_name(f, i, p) else {
+                return Err(DocError::reselect(stored.as_str()));
+            };
+            if let Some(ti) = named_body(st, name, p) {
+                out.push(BlendPickTarget::Body(ti));
+            } else {
+                let makers = suppressed_edge_makers(doc, f, name);
+                if !makers.is_empty() {
+                    out.push(BlendPickTarget::Suppressed(makers.into_iter().map(str::to_string).collect()));
+                } else {
+                    return Err(DocError::reselect(stored.as_str()));
+                }
             }
-        };
-        let ti = match (found, fallback) {
-            (Some(ti), _) => ti,
-            (None, Some(ti)) => ti,
-            (None, None) => *fallback.insert(blend_target(st, &None, pts)?),
-        };
-        out.push(ti);
+        } else {
+            let (on, note) = body_on_edge_noted(st, p);
+            notes.extend(note);
+            match on {
+                Some(ti) => out.push(BlendPickTarget::Body(ti)),
+                None => {
+                    lost += 1;
+                    out.push(BlendPickTarget::Lost);
+                }
+            }
+        }
     }
-    Ok((out, notes))
+    Ok((out, notes, lost))
+}
+
+pub(crate) struct ResolvedBlendEdges {
+    /// Each resolved edge point paired with its pick index in `edges`.
+    pub(crate) points: Vec<(usize, Vec3)>,
+    pub(crate) warning: Option<String>,
+    pub(crate) suppressed_makers: Vec<String>,
+    pub(crate) suppressed_count: usize,
+    pub(crate) unnamed_lost: usize,
 }
 
 /// The edges `idx` of blend `f` found on body `mb`: by name, where the edge was stored with one.
-/// A name that no longer finds exactly its edge fails the blend, asking for the edge to be picked
+/// A name whose direct upstream maker is suppressed is skipped with a note rather than failing;
+/// a name that otherwise no longer finds its edge fails the blend, asking for the edge to be picked
 /// again; so does a name a build stored for the wrong body (see `trusted_edge_name`).
 /// `placed`: an earlier feature can have moved the body whole ([`bodies_placed_before`]).
 pub(crate) fn blend_edges_on(
+    doc: &Document,
     mb: &ModelBody,
     f: &Feature,
     edges: &[crate::Position],
     idx: &[usize],
     placed: bool,
-    warning: &mut Option<String>,
-) -> Result<Vec<Vec3>> {
+    sole_solid: bool,
+) -> Result<ResolvedBlendEdges> {
     let pick = |i: usize| edges.get(i).map(|p| p.0).unwrap_or(Vec3::ZERO);
+    let explicit_body = matches!(
+        &f.kind,
+        FeatureKind::Fillet { body: Some(_), .. } | FeatureKind::Chamfer { body: Some(_), .. } | FeatureKind::Dogbone { body: Some(_), .. }
+    );
+    let allow_nearest = explicit_body || sole_solid;
     if !f.edge_names.iter().any(|n| !n.is_empty()) {
         let pts: Vec<Vec3> = idx.iter().map(|i| pick(*i)).collect();
-        let refs: Vec<EdgeRef> = idx.iter().map_while(|i| f.edge_refs.get(*i).cloned()).collect();
-        return resolve_edges(&mb.body, &pts, &refs, warning);
+        let refs: Vec<Option<&EdgeRef>> = idx.iter().map(|i| f.edge_refs.get(*i)).collect();
+        let mut warning = None;
+        let points: Vec<(usize, Vec3)> =
+            resolve_edges(&mb.body, &pts, &refs, allow_nearest, &mut warning)?.into_iter().map(|(k, p)| (idx[k], p)).collect();
+        let unnamed_lost = idx.len().saturating_sub(points.len());
+        return Ok(ResolvedBlendEdges { points, warning, suppressed_makers: Vec::new(), suppressed_count: 0, unnamed_lost });
     }
     let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let mut suppressed_makers = Vec::new();
+    let mut suppressed_count = 0usize;
+    let mut unnamed_lost = 0usize;
     for &i in idx {
         let p = pick(i);
         let Some(stored) = f.edge_names.get(i).filter(|n| !n.is_empty()) else {
             // An edge picked without a name: by its point. A pick on the axis of a round must not
             // fall through to the tangency seam (#775).
             let mut w = None;
-            let refs: Vec<EdgeRef> = f.edge_refs.get(i).cloned().into_iter().collect();
+            let refs = [f.edge_refs.get(i)];
             let skipped = "edge `?` no longer exists and was skipped";
             if pick_lies_on_a_round_axis(&mb.body, p) {
+                unnamed_lost += 1;
                 notes.push(skipped.into());
-            } else if let Ok(q) = resolve_edges(&mb.body, &[p], &refs, &mut w) {
-                out.extend(q);
+            } else if let Ok(q) = resolve_edges(&mb.body, &[p], &refs, allow_nearest, &mut w) {
+                out.extend(q.into_iter().map(|(_, pt)| (i, pt)));
                 notes.push("an edge reference without a name was found by its point".into());
             } else {
+                unnamed_lost += 1;
                 notes.push(skipped.into());
             }
             continue;
@@ -10885,38 +11205,57 @@ pub(crate) fn blend_edges_on(
         });
         let moved = moved_since.unwrap_or(false);
         let named = trusted_edge_name(f, i, p);
+        // On the body the pick was made on, a pick on an edge named alike but for its faces' tie
+        // numbers is that edge: the numbers moved, not the edge (#22230). An unchanged box does
+        // not show the body unmoved where an earlier feature places it whole.
+        let unmoved = moved_since == Some(false) && !placed;
         let Some(hit) = named.and_then(|n| crate::name_lookup::locate_projected_edge(mb, n, p).ok()) else {
             // #21997: the saved whole closed edge can now exist as the pieces a whole-turn
             // revolve join's turned seam split it into. Every piece is blended, as a pick made
             // today stores one name per piece.
             let Some(pieces) = named.and_then(|n| crate::name_lookup::recover_split_closed_edge(mb, n, p)) else {
+                // #22418: with the other number, the name can find no edge at all, where only one
+                // of the faces told apart by it meets the edge's other face; the pick then lies on
+                // the edge it is, clear of its ends.
+                if named.filter(|_| unmoved).and_then(|n| crate::name_lookup::retied_edge(mb, &mb.mesh(), n, None, p)).is_some() {
+                    out.push((i, p));
+                    continue;
+                }
+                if let Some(name) = named {
+                    let makers = suppressed_edge_makers(doc, f, name);
+                    if !makers.is_empty() {
+                        suppressed_count += 1;
+                        for m in makers {
+                            if !suppressed_makers.iter().any(|existing| existing == m) {
+                                suppressed_makers.push(m.to_string());
+                            }
+                        }
+                        continue;
+                    }
+                }
                 return Err(DocError::reselect(stored.as_str()));
             };
-            out.extend(pieces.iter().map(|hit| if moved { off_the_ends(mb, hit.edge, hit.point) } else { hit.point }));
+            out.extend(pieces.iter().map(|hit| (i, if moved { off_the_ends(mb, hit.edge, hit.point) } else { hit.point })));
             notes.push(format!("the saved edge `{stored}` now exists as {} pieces; every piece is blended", pieces.len()));
             continue;
         };
-        // On the body the pick was made on, a pick off the named edge and on one named alike but for
-        // its faces' tie numbers is that edge: the numbers moved, not the edge (#22230). An
-        // unchanged box does not show the body unmoved where an earlier feature places it whole.
-        let hit = match (hit.on_point, moved_since) {
-            (false, Some(false)) if !placed => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, hit.edge, p)
+        // A pick off the named edge, on one named alike but for its faces' tie numbers (#22230).
+        let hit = match hit.on_point {
+            false if unmoved => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, Some(hit.edge), p)
                 .map_or(hit, |edge| crate::name_lookup::EdgeHit { edge, point: p, verified: false, on_point: true }),
             _ => hit,
         };
         if let Some(note) = hit.note(stored) {
             notes.push(note);
         }
-        out.push(if moved { off_the_ends(mb, hit.edge, hit.point) } else { hit.point });
+        out.push((i, if moved { off_the_ends(mb, hit.edge, hit.point) } else { hit.point }));
     }
-    if out.is_empty() {
+    if out.is_empty() && suppressed_count == 0 {
         let why = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
         return Err(DocError::Invalid(format!("none of the selected edges exist any more{why}")));
     }
-    if !notes.is_empty() {
-        *warning = Some(notes.join("; "));
-    }
-    Ok(out)
+    let warning = (!notes.is_empty()).then(|| notes.join("; "));
+    Ok(ResolvedBlendEdges { points: out, warning, suppressed_makers, suppressed_count, unnamed_lost })
 }
 
 /// Whether a feature of `doc` before `f` (or `f` not found in it) places bodies whole: a Move
@@ -11385,15 +11724,15 @@ pub(crate) fn revolve_axis(
             other => Err(DocError::Unknown(format!("sketch axis `{other}`"))),
         },
         AxisRef::World { axis } => {
-            let d = match axis.to_ascii_uppercase().as_str() {
-                "X" => Vec3::X,
-                "Y" => Vec3::Y,
-                "Z" => Vec3::Z,
+            let (world, d) = match axis.to_ascii_uppercase().as_str() {
+                "X" => ("X", Vec3::X),
+                "Y" => ("Y", Vec3::Y),
+                "Z" => ("Z", Vec3::Z),
                 other => return Err(DocError::Unknown(format!("axis `{other}`"))),
             };
             let pl = &ss.plane;
             if d.dot(pl.normal()).abs() > 1e-9 || pl.height(Vec3::ZERO).abs() > 1e-9 {
-                return Err(DocError::Invalid(format!("the {axis} axis does not lie in the sketch plane")));
+                return Err(DocError::WorldRevolveAxisOutsideSketchPlane { axis: world });
             }
             Ok((pl.to_local(Vec3::ZERO), Vec2::new(d.dot(pl.x), d.dot(pl.y))))
         }
@@ -16741,8 +17080,17 @@ fn with_named_face_points(doc: &Document, vals: &BTreeMap<String, Value>, state:
             crate::name_lookup::locate_owned_face(input, body, n, from)
         } else if matches!(f.kind, FeatureKind::Thread { .. }) {
             crate::name_lookup::locate_thread_face_on_body(input, body, n, from)
-        } else if matches!(f.kind, FeatureKind::Extrude { .. }) {
-            // An extrude's faces are its From and To faces: only where they lie counts (#22281).
+        } else if matches!(
+            f.kind,
+            FeatureKind::Extrude { .. }
+                | FeatureKind::Hole { .. }
+                | FeatureKind::Boss { .. }
+                | FeatureKind::SnapFit { .. }
+                | FeatureKind::Rest { .. }
+        ) {
+            // Faces that only locate where a surface lies (an extrude's From/To face, a hole's
+            // start or To face, …) stay valid when an unrelated split elsewhere on the same face
+            // appears (#22281) or disappears.
             crate::name_lookup::locate_level_face_on_body(input, body, n, from)
         } else {
             crate::name_lookup::locate_face_on_body(input, body, n, from)
@@ -17162,6 +17510,20 @@ fn replay(
             // shows them (#17623).
             let from = targets_as_shown(named_from.unwrap_or(st), src, targets)?;
             let (spots, dir) = hole_spots_raw(vals, &from, src)?;
+            // A body transfer between the hole and this pattern has baked its frame change into
+            // the body: the copies are seeded from the hole as carried, not from its authored
+            // spot, where the body no longer is.
+            let (carry, landed_in) = {
+                let aimed: &[String] = if !src.participants.is_empty() { &src.participants } else { &f.participants };
+                let aimed: &[String] = if aimed.iter().any(|b| b == "*") { &[] } else { aimed };
+                crate::body_transfer::carried_between(doc, src.id, f.id, aimed)
+            };
+            let (spots, dir, carried_to) = if crate::is_identity(&carry) {
+                (spots, dir, None)
+            } else {
+                let moved = spots.into_iter().map(|spot| HoleSpot { at: crate::apply_point(&carry, spot.at), ..spot }).collect();
+                (moved, crate::apply_vector(&carry, dir), Some(carry))
+            };
             let prefixes: Vec<_> = spots.iter().map(|spot| spot.point.map(hole_point_role)).collect();
             let shown = if named_from.is_some() { targets_as_shown(st, src, targets)? } else { from };
             let st: &ModelState = &shown;
@@ -17187,6 +17549,21 @@ fn replay(
             // A hole at a picked spot is kept in the frame of the body it lies on.
             let picks = PickFrames::new(doc, st, own, src);
             let scope = hole_drill_scope(src);
+            // The pattern's matrices are in its own component's frame, the carried hole in the
+            // frame of the component the body went into: turn the matrices into that frame, as
+            // a pattern of the body itself does.
+            let conjugated: Vec<Mat>;
+            let mats: &[Mat] = match landed_in.filter(|c| *c != f.component && picks.at.is_none()) {
+                Some(c) => {
+                    let (here, there) = (doc.component_transform(f.component), doc.component_transform(c));
+                    let singular = || DocError::Invalid("the component holding the hole has a singular placement".into());
+                    let into = crate::mat_mul(&crate::mat_inverse(&there).ok_or_else(singular)?, &here);
+                    let from = crate::mat_mul(&crate::mat_inverse(&here).ok_or_else(singular)?, &there);
+                    conjugated = mats.iter().map(|m| crate::mat_mul(&into, &crate::mat_mul(m, &from))).collect();
+                    &conjugated
+                }
+                None => mats,
+            };
             let named = |b: &ModelBody, q: Vec3| (scope.is_empty() || scope.contains(&b.name)).then(|| box_dist(b, q));
             for (k, m) in mats.iter().enumerate() {
                 let (m, _) = match spots.first() {
@@ -17197,7 +17574,9 @@ fn replay(
                 let d = match sketch_side {
                     Some((n, flip)) => {
                         let moved = spots.iter().map(|spot| crate::apply_point(m, spot.at));
-                        let n = crate::apply_vector(m, n).normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
+                        let n = crate::apply_vector(m, carried_to.as_ref().map_or(n, |c| crate::apply_vector(c, n)))
+                            .normalized()
+                            .ok_or_else(|| DocError::Invalid("hole direction".into()))?;
                         if record_probes {
                             probe_rays.extend(moved.clone().map(|q| (q, n)));
                         }
@@ -17219,7 +17598,7 @@ fn replay(
                         probe_boxes.push(Some(seg.inflated(extra_tol + 1e-6)));
                     }
                     on.push((at, d));
-                    let to = to.map(|t| crate::apply_point(m, t.0));
+                    let to = to.map(|t| crate::apply_point(m, carried_to.as_ref().map_or(t.0, |c| crate::apply_point(c, t.0))));
                     let depth = hole_depth_to(st, &at, d, &to, depth)?;
                     reach_of.push(depth.as_ref().map_or(Ok(f64::INFINITY), |e| val(vals, e, Kind::Length))?);
                     let reach = hole_reach(vals, st, &at, d, diameter, &depth, hole, !from_inside, mesh_scope)?;
@@ -17379,12 +17758,7 @@ fn replay(
             *missed += m + cut.iter().filter(|c| **c == CopyCut::Missed).count();
             *total += t + (instances.len() - unsure.len());
         }
-        let mut unthreaded = 0;
-        for (on, reach) in axes.iter().zip(&reaches) {
-            if let Some((_, d)) = on.first() {
-                unthreaded += hole_threads(vals, st, src, f.id, on.iter().map(|(at, _)| *at), *d, reach, true)?;
-            }
-        }
+        let unthreaded = hole_threads_copies(vals, st, src, f.id, &axes, &reaches)?;
         if unthreaded > 0 {
             append_warning(warning, format!("{unthreaded} hole copies are not threaded: their walls cannot take the thread"));
         }
@@ -17460,12 +17834,7 @@ fn replay(
             *total += t + (entry.instances.len() - unsure.len());
         }
         for entry in &batch.entries {
-            let mut unthreaded = 0;
-            for (on, reach) in entry.axes.iter().zip(&entry.reaches) {
-                if let Some((_, d)) = on.first() {
-                    unthreaded += hole_threads(vals, st, entry.src, scoped.id, on.iter().map(|(at, _)| *at), *d, reach, true)?;
-                }
-            }
+            let unthreaded = hole_threads_copies(vals, st, entry.src, scoped.id, &entry.axes, &entry.reaches)?;
             if unthreaded > 0 {
                 append_warning(warning, format!("{unthreaded} hole copies are not threaded: their walls cannot take the thread"));
             }
@@ -18041,6 +18410,7 @@ fn hole_threads(
     dir: Vec3,
     reaches: &[f64],
     copy: bool,
+    collect: Option<&mut TapBatch>,
 ) -> Result<usize> {
     let FeatureKind::Hole { thread: Some(d), thread_depth, diameter, hand, modeled, ease_out, .. } = &src.kind else { return Ok(0) };
     let thread_depth = thread_depth.as_ref().map(|d| val(vals, d, Kind::Length)).transpose()?;
@@ -18123,8 +18493,39 @@ fn hole_threads(
         }
         Ok(Tapped::Listed(threads))
     };
+    let spots: Vec<(Vec3, f64)> = spots.zip(reaches.iter().copied()).collect();
+    // Modelled taps lying apart on one body share one cut and one check, however many copies a
+    // pattern makes. Every spot is planned on the uncut model first; a spot that cannot be
+    // planned, or tools that meet, leave the spots to the one-by-one loop below.
+    let collecting = collect.is_some();
+    if *modeled && (collecting || spots.len() > 1) {
+        let mut own = TapBatch::default();
+        let into: &mut TapBatch = match collect {
+            Some(caller) => caller,
+            None => &mut own,
+        };
+        for &(p, reach) in &spots {
+            let walls = parallel_tapped_wall(st, p, dir, r, reach);
+            if copy && walls.is_empty() {
+                continue;
+            }
+            match plan(st, p, walls) {
+                Ok(Tapped::Cut(on)) => into.ons.extend(on),
+                _ => into.failed = true,
+            }
+        }
+        if collecting {
+            return Ok(0);
+        }
+        if !own.failed
+            && let Some(next) = thread::cut_apart_taps(st, &own.ons)?
+        {
+            *st = next;
+            return Ok(0);
+        }
+    }
     let mut skipped = 0;
-    for (p, reach) in spots.zip(reaches.iter().copied()) {
+    for (p, reach) in spots {
         let walls = parallel_tapped_wall(st, p, dir, r, reach);
         if copy && walls.is_empty() {
             continue;
@@ -18142,6 +18543,48 @@ fn hole_threads(
         }
     }
     Ok(skipped)
+}
+
+/// The modelled taps a feature's copies need, planned on the uncut model so one cut can make them.
+#[derive(Default)]
+struct TapBatch {
+    ons: Vec<thread::ThreadOn>,
+    /// A spot could not be planned: the copies go one by one, as before.
+    failed: bool,
+}
+
+/// Threads the hole copies at every axis group of one source: the modelled taps that lie apart
+/// are cut together, the rest one by one. The count is the copies left unthreaded.
+fn hole_threads_copies(
+    vals: &BTreeMap<String, Value>,
+    st: &mut ModelState,
+    src: &Feature,
+    id: u64,
+    axes: &[Vec<(Vec3, Vec3)>],
+    reaches: &[Vec<f64>],
+) -> Result<usize> {
+    let modeled = matches!(&src.kind, FeatureKind::Hole { modeled: true, .. });
+    if modeled && axes.len() > 1 {
+        let mut batch = TapBatch::default();
+        for (on, reach) in axes.iter().zip(reaches) {
+            if let Some((_, d)) = on.first() {
+                hole_threads(vals, st, src, id, on.iter().map(|(at, _)| *at), *d, reach, true, Some(&mut batch))?;
+            }
+        }
+        if !batch.failed
+            && let Some(next) = thread::cut_apart_taps(st, &batch.ons)?
+        {
+            *st = next;
+            return Ok(0);
+        }
+    }
+    let mut unthreaded = 0;
+    for (on, reach) in axes.iter().zip(reaches) {
+        if let Some((_, d)) = on.first() {
+            unthreaded += hole_threads(vals, st, src, id, on.iter().map(|(at, _)| *at), *d, reach, true, None)?;
+        }
+    }
+    Ok(unthreaded)
 }
 
 enum Tapped {
@@ -18297,15 +18740,16 @@ fn height_at(st: &ModelState, face: Option<(usize, usize)>, plane: &Plane, centr
     if let Some(square) = square_face_level(st, (bi, fi), plane) {
         return square.level;
     }
-    // A curved or slanted face: where the profile's middle meets it.
-    for dir in [n, n * -1.0] {
-        if let Some((t, hit_face)) = ray_face(b, centre, dir)
-            && hit_face == fi
-        {
-            return h(centre + dir * t);
-        }
+    // A curved or slanted face: where the profile's middle meets it. A surface round the sketch
+    // plane is met both ways, and the end is on the side the pick is on (#23614): the level nearer
+    // the pick's, the one along the normal when they are as near.
+    let [along, against] =
+        [n, n * -1.0].map(|dir| ray_face(b, centre, dir).filter(|(_, hit_face)| *hit_face == fi).map(|(t, _)| h(centre + dir * t)));
+    let away = |level: f64| (level - h(p)).abs();
+    match (along, against) {
+        (Some(along), Some(against)) if away(against) < away(along) => against,
+        _ => along.or(against).unwrap_or_else(|| h(p)),
     }
-    h(p)
 }
 
 /// The face a To Object pick is on: the nearest face over every solid body, `(body index,
@@ -19437,11 +19881,49 @@ fn eval_feature(
     sources: Option<&SourceStates>,
 ) -> Result<()> {
     JOINED_TARGETS.with(|n| n.borrow_mut().clear());
-    let r = eval_feature_kind(doc, vals, f, st, warning, import_report, repair, heal, prepared_meshes, prepared_import, previous_import, sources);
+    let result =
+        eval_feature_kind(doc, vals, f, st, warning, import_report, repair, heal, prepared_meshes, prepared_import, previous_import, sources);
     for note in JOINED_TARGETS.with(|n| std::mem::take(&mut *n.borrow_mut())) {
         append_warning(warning, note);
     }
-    r
+    let Err(error @ DocError::WorldRevolveAxisOutsideSketchPlane { axis: world @ ("X" | "Y") }) = &result else {
+        return result;
+    };
+
+    let mut retry = f.clone();
+    let axis = match &mut retry.kind {
+        FeatureKind::Revolve { axis, .. } | FeatureKind::SurfaceRevolve { axis, .. } => axis,
+        _ => return result,
+    };
+    let sketch = world.to_ascii_lowercase();
+    *axis = AxisRef::SketchAxis { axis: sketch.clone() };
+    if revolve_retry_succeeds(doc, vals, &retry, st, heal) {
+        return Err(DocError::Invalid(format!("{error}. Did you mean \"{sketch}\", the sketch's own axis?")));
+    }
+    result
+}
+
+/// The world axis was refused before any body changed. Test the suggested axis against the
+/// same selection, extent, and operation, with its own checks and a state we can discard.
+fn revolve_retry_succeeds(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState, heal: bool) -> bool {
+    let mut trial = st.clone();
+    let validation = EVAL_VALIDATION.get();
+    let accepted = kernel::guard(&f.name, || {
+        let _validation = EvalValidationGuard::new(validation);
+        let (result, deferred) = kernel::validating(validation, || {
+            eval_feature_kind(doc, vals, f, &mut trial, &mut None, &mut None, &mut None, heal, None, None, None, None)
+        });
+        if result.is_err() {
+            return Ok(false);
+        }
+        // The normal evaluator runs these checks outside its feature validation scope.
+        let (passed, _) = kernel::validating(kernel::Validation::EachStep, || {
+            (!deferred || check_kept(st, &trial).is_ok()) && absorb_sheet_cuts(doc, st, &mut trial, f, validation, &mut None).is_ok()
+        });
+        Ok(passed)
+    });
+    JOINED_TARGETS.with(|n| n.borrow_mut().clear());
+    matches!(accepted, Ok(true))
 }
 
 /// The start and end of the note a feature built from a sketch with a lost link carries.
@@ -19751,7 +20233,7 @@ fn eval_feature_kind(
             } else {
                 apply_beside_sheet_cut(doc, st, f, tools, Operation::Cut, &[], &handled)?;
             }
-            hole_threads(vals, st, f, f.id, spots.iter().map(|spot| spot.at), dir, &reaches, false)?;
+            hole_threads(vals, st, f, f.id, spots.iter().map(|spot| spot.at), dir, &reaches, false, None)?;
             Ok(())
         }
         FeatureKind::Thread { .. } => thread::eval(doc, vals, f, st, warning),
@@ -20499,12 +20981,25 @@ fn eval_feature_kind(
                 }
                 _ => None,
             };
-            let (on, on_several) = blend_bodies(st, f, body, &crate::plain(edges))?;
+            let (targets, on_several, lost_at_body) = blend_bodies(doc, st, f, body, &crate::plain(edges))?;
             let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-            for (i, ti) in on.iter().enumerate() {
-                match groups.iter_mut().find(|(b, _)| b == ti) {
-                    Some((_, idx)) => idx.push(i),
-                    None => groups.push((*ti, vec![i])),
+            let mut suppressed_makers: Vec<String> = Vec::new();
+            let mut suppressed_count: usize = 0;
+            for (i, target) in targets.into_iter().enumerate() {
+                match target {
+                    BlendPickTarget::Body(ti) => match groups.iter_mut().find(|(b, _)| *b == ti) {
+                        Some((_, idx)) => idx.push(i),
+                        None => groups.push((ti, vec![i])),
+                    },
+                    BlendPickTarget::Suppressed(makers) => {
+                        suppressed_count += 1;
+                        for m in makers {
+                            if !suppressed_makers.contains(&m) {
+                                suppressed_makers.push(m);
+                            }
+                        }
+                    }
+                    BlendPickTarget::Lost => {}
                 }
             }
             let (mut found, mut notes, mut fitted, mut tapered_all) = (Vec::new(), on_several, Vec::new(), Vec::new());
@@ -20527,24 +21022,59 @@ fn eval_feature_kind(
             // (pick, the blended edge's middle, its radius), for pattern and mirror copies.
             let mut by_pick: Vec<(usize, Vec3, f64)> = Vec::new();
             let placed = bodies_placed_before(doc, f);
+            let single_solid = st.bodies.iter().filter(|b| !b.body.is_mesh()).count() == 1;
+            let mut unnamed_lost = lost_at_body;
             for (ti, idx) in &groups {
                 let Some(mb) = st.bodies.get(*ti) else { return Err(DocError::Invalid("body".into())) };
-                let mut w = None;
-                let resolved = blend_edges_on(mb, f, edges, idx, placed, &mut w)?;
+                let res = blend_edges_on(doc, mb, f, edges, idx, placed, single_solid && !mb.body.is_mesh())?;
+                suppressed_count += res.suppressed_count;
+                unnamed_lost += res.unnamed_lost;
+                for m in res.suppressed_makers {
+                    if !suppressed_makers.contains(&m) {
+                        suppressed_makers.push(m);
+                    }
+                }
+                if let Some(w) = res.warning {
+                    notes.push(w);
+                }
+                if res.points.is_empty() {
+                    continue;
+                }
                 if let Some(all) = &each_r {
-                    if resolved.len() != idx.len() {
+                    let mut seen_picks = std::collections::BTreeSet::new();
+                    if res.points.len() + res.suppressed_count != idx.len() || res.points.iter().any(|(i, _)| !seen_picks.insert(*i)) {
                         return Err(DocError::Invalid(
                             "an edge given its own radius (`edge_radii`) no longer resolves to one edge: each radius needs its edge".into(),
                         ));
                     }
-                    for (p, i) in resolved.iter().zip(idx) {
-                        radius_of.insert(key(*ti, p), (*i, all.get(*i).copied().unwrap_or(r)));
+                    for &(i, p) in &res.points {
+                        radius_of.insert(key(*ti, &p), (i, all.get(i).copied().unwrap_or(r)));
                     }
                 }
-                picks.push((*ti, resolved));
-                if let Some(w) = w {
-                    notes.push(w);
+                picks.push((*ti, res.points.into_iter().map(|(_, p)| p).collect()));
+            }
+            if each_r.is_some() && unnamed_lost > 0 {
+                return Err(DocError::Invalid(
+                    "an edge given its own radius (`edge_radii`) no longer resolves to one edge: each radius needs its edge".into(),
+                ));
+            }
+            if lost_at_body > 0 {
+                notes.push(format!("{lost_at_body} edge reference(s) no longer found and skipped"));
+            }
+            if picks.is_empty() {
+                if suppressed_count > 0 && unnamed_lost == 0 {
+                    let list = suppressed_makers.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+                    let verb = if suppressed_makers.len() == 1 { "is" } else { "are" };
+                    return Err(DocError::Invalid(format!("nothing to blend: {list} {verb} suppressed")));
                 }
+                if !edges.is_empty() {
+                    let why = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+                    return Err(DocError::Invalid(format!("none of the selected edges exist any more{why}")));
+                }
+            } else if suppressed_count > 0 {
+                let list = suppressed_makers.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+                let verb = if suppressed_makers.len() == 1 { "is" } else { "are" };
+                notes.push(format!("{suppressed_count} edge reference(s) skipped: {list} {verb} suppressed"));
             }
             let active_groups = without_smooth(st, picks, &mut notes)?;
             struct BlendGroupOut {
@@ -20724,13 +21254,21 @@ fn eval_feature_kind(
                     // Designs saved before #2247 combined the pieces a cut split off a body that
                     // was already several pieces (`Posts`, `Posts (1)`). A cut keeps them in one
                     // body now: the piece is in `Posts`, which is a tool too or the body joined to.
+                    // A pattern copy is named the same way (`T (9)`). While its number is below the
+                    // body's material-region count (a mesh has none) it is one of those pieces; past
+                    // that the copy is gone (a pattern count lowered by a parameter), so the Combine
+                    // builds without it and says so. A numbered name listed without its seed is unknown.
                     None => match split_piece_of(t) {
-                        Some(base)
+                        Some((base, n))
                             if st.body(base).is_some()
                                 && (tools.iter().any(|o| **o == *base)
                                     || (**target == *base && matches!(operation, Operation::Join | Operation::NewBody))) =>
                         {
-                            append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                            if st.body(base).is_some_and(|b| numbered_piece_in(&b.body, n)) {
+                                append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                            } else {
+                                append_warning(warning, format!("`{t}` is not there any more; skipped"));
+                            }
                         }
                         // A tool whose feature is suppressed is left out, as a suppressed feature is
                         // everywhere else: the Combine builds from the tools that are there (#13474).
@@ -23645,6 +24183,99 @@ mod migrated_placement_digest_tests {
 
         assert_ne!(mirror_lost, mirror_ok, "mirror digest must invalidate when migration stops resolving");
         assert_ne!(pattern_lost, pattern_ok, "pattern digest must invalidate when migration stops resolving");
+    }
+}
+
+#[cfg(test)]
+mod blend_reference_hardening_tests {
+    use super::*;
+
+    /// #4341: `blend_target` with no explicit body returns the sole solid body when only one
+    /// exists (single-body fallback), and refuses to jump to an unrelated distant body when
+    /// several solid bodies exist and none has an edge within standard pick reach
+    /// (`size * 0.05 + 1e-3`).
+    #[test]
+    fn blend_target_never_jumps_to_unrelated_distant_body() {
+        let mut st = ModelState::default();
+        let other = kernel::box_solid(Vec3::new(500.0, 0.0, 0.0), Vec3::new(520.0, 20.0, 10.0)).unwrap();
+        st.bodies.push(ModelBody::new("Body2".into(), other, 2));
+
+        // Single solid body: returns that sole body even when the pick is beyond 5% reach.
+        assert_eq!(blend_target(&st, &None, &[Vec3::new(20.0, 10.0, 10.0)]).unwrap(), 0);
+
+        // Two solid bodies: distant pick outside reach of all bodies must be refused (#4341).
+        let third = kernel::box_solid(Vec3::new(800.0, 0.0, 0.0), Vec3::new(820.0, 20.0, 10.0)).unwrap();
+        st.bodies.push(ModelBody::new("Body3".into(), third, 3));
+        let err = blend_target(&st, &None, &[Vec3::new(20.0, 10.0, 10.0)]).unwrap_err();
+        assert!(err.to_string().contains("none of the selected edges exist any more"), "{err}");
+        assert_eq!(blend_target(&st, &None, &[Vec3::new(520.0, 10.0, 10.0)]).unwrap(), 0);
+        // 1.0 mm off the edge on a 20×20×10 box (diagonal 30, reach 1.501 mm) still hits Body2.
+        assert_eq!(blend_target(&st, &None, &[Vec3::new(521.0, 10.0, 10.0)]).unwrap(), 0);
+        assert_eq!(blend_target(&st, &None, &[Vec3::new(820.0, 10.0, 10.0)]).unwrap(), 1);
+    }
+
+    /// #4341: when two copies share identical face/edge names (`NameCell::same`) and the pick
+    /// point no longer lies on either copy, `named_body` must refuse instead of silently picking
+    /// whichever copy happens to be nearer.
+    #[test]
+    fn named_body_never_guesses_between_ambiguous_copies_by_distance() {
+        let mut st = ModelState::default();
+        let b1 = ModelBody::new("Body1".into(), kernel::box_solid(Vec3::new(100.0, 0.0, 0.0), Vec3::new(110.0, 10.0, 10.0)).unwrap(), 1);
+        let mut b2 = ModelBody::new("Body2".into(), kernel::box_solid(Vec3::new(20.0, 0.0, 0.0), Vec3::new(30.0, 10.0, 10.0)).unwrap(), 2);
+        b2.names = crate::naming::NameCell::same(&b1);
+        let on_b2 = Vec3::new(30.0, 5.0, 10.0);
+        let edge_name = crate::naming::edge_names_at(&b2, &[on_b2]).pop().unwrap();
+        assert!(!edge_name.is_empty());
+        st.bodies.push(b1);
+        st.bodies.push(b2);
+
+        // Pick lies on neither copy (even though Body2 is much closer than Body1): must be None.
+        assert_eq!(named_body(&st, &edge_name, Vec3::new(10.0, 5.0, 10.0)), None);
+        // Pick lies directly on Body2's matching edge: resolves uniquely to Body2.
+        assert_eq!(named_body(&st, &edge_name, on_b2), Some(1));
+    }
+
+    /// #4341: `resolve_edges` must refuse a disappeared edge instead of jumping to an unrelated
+    /// nearby edge (when `allow_nearest` is false or equidistant) or linearly remapping an
+    /// `EdgeRef` from a disjoint body, while allowing explicit-body unnamed blends to follow a
+    /// unique nearest edge after a resize.
+    #[test]
+    fn resolve_edges_refuses_unrelated_nearby_edge_and_disjoint_ref() {
+        let solid = kernel::box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 10.0)).unwrap();
+        let mut warn = None;
+        // Midpoint of the right face is 5 mm from the top/bottom edges (within old 0.25 * size
+        // and equidistant between two edges): refused both without and with `allow_nearest`.
+        assert!(resolve_edges(&solid, &[Vec3::new(40.0, 15.0, 5.0)], &[], false, &mut warn).is_err());
+        assert!(resolve_edges(&solid, &[Vec3::new(40.0, 15.0, 5.0)], &[], true, &mut warn).is_err());
+
+        // An EdgeRef recorded on a disjoint body at x = 500..540 must not remap onto x = 0..40.
+        let disjoint = EdgeRef { dir: Vec3::Y, min: Vec3::new(500.0, 0.0, 0.0), max: Vec3::new(540.0, 30.0, 10.0) };
+        assert!(resolve_edges(&solid, &[Vec3::new(540.0, 15.0, 10.0)], &[Some(&disjoint)], false, &mut warn).is_err());
+        assert!(resolve_edges(&solid, &[Vec3::new(540.0, 15.0, 10.0)], &[Some(&disjoint)], true, &mut warn).is_err());
+
+        // An edge pick actually on the body still resolves cleanly.
+        let hit = resolve_edges(&solid, &[Vec3::new(40.0, 15.0, 10.0)], &[], false, &mut warn).unwrap();
+        assert_eq!(hit, vec![(0, Vec3::new(40.0, 15.0, 10.0))]);
+        assert_eq!(warn, None);
+
+        // A pick 4 mm past x = 40 (outside reach 2.55 mm) is refused without `allow_nearest`,
+        // but follows the unique nearest edge when `allow_nearest` is set (explicit target body).
+        assert!(resolve_edges(&solid, &[Vec3::new(44.0, 15.0, 10.0)], &[], false, &mut warn).is_err());
+        let moved = resolve_edges(&solid, &[Vec3::new(44.0, 15.0, 10.0)], &[], true, &mut warn).unwrap();
+        assert_eq!(moved, vec![(0, Vec3::new(40.0, 15.0, 10.0))]);
+        assert!(warn.as_deref().is_some_and(|w| w.contains("re-found on the nearest edge")), "{warn:?}");
+    }
+
+    /// #4341: `edge_maker_ids` extracts direct face makers (base, nested blend/inner, and copies)
+    /// while ignoring piece-qualifier splitters (`#[...]`) so suppressing a splitter still asks to
+    /// reselect the piece rather than treating the face's maker as suppressed.
+    #[test]
+    fn edge_maker_ids_reads_direct_makers_and_ignores_piece_qualifiers() {
+        assert_eq!(edge_maker_ids("F2:side:l1|F2:top"), vec![2]);
+        assert_eq!(edge_maker_ids("F2:side:l2#[F5:side:l1,F2:side:l3]|F2:top#[F5:side:l1]"), vec![2]);
+        assert_eq!(edge_maker_ids("F5:blend(F2:side:l1|F2:top)|F4:top"), vec![2, 4, 5]);
+        assert_eq!(edge_maker_ids("F2:side:l1@F7.1|F2:top@F7.1"), vec![2, 7]);
+        assert_eq!(edge_maker_ids("F3:inner(F2:side:l1)|F3:inner(F2:top)"), vec![2, 3]);
     }
 }
 

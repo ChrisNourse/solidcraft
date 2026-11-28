@@ -19,11 +19,14 @@ pub(crate) mod shell_groups;
 /// moved the first time it is read ([`crate::ops::transform_matrix`]). A part placed many times
 /// keeps one record until a placement's own geometry is needed (an operation on it, a measure,
 /// an export): moved for every placement as it was placed, the copies of a large assembly placed
-/// a hundred times took tens of gigabytes. Reads as the record either way.
+/// a hundred times took tens of gigabytes. Or a body another kernel holds in its own form, its
+/// record made the first time it is read ([`crate::held`]; every read counted). Reads as the
+/// record either way.
 #[derive(Clone, Debug)]
 pub(crate) enum RecordCell {
     Ready(std::sync::Arc<Brep>),
     Moved(std::sync::Arc<LazyMove>),
+    Held(std::sync::Arc<crate::held::HeldCell>),
 }
 
 /// How a record moves by a rigid motion ([`crate::placement::moved`]).
@@ -94,21 +97,26 @@ impl LazyMove {
 }
 
 impl RecordCell {
-    /// The record as an `Arc` (moved first, when it is moved lazily).
+    /// The record as an `Arc` (moved first, when it is moved lazily; exported first, and the
+    /// read counted where it was asked, when another kernel holds the body).
+    #[track_caller]
     pub(crate) fn arc(&self) -> &std::sync::Arc<Brep> {
         match self {
             RecordCell::Ready(r) => r,
             RecordCell::Moved(m) => m.record(),
+            RecordCell::Held(h) => h.record(std::panic::Location::caller()),
         }
     }
 
     /// The record whose topology this one has, without moving it: the record itself, or the
     /// part's a lazily moved one moves. Faces, edges and vertices, their order and counts are
     /// the same; positions are not.
+    #[track_caller]
     pub(crate) fn topology(&self) -> &Brep {
         match self {
             RecordCell::Ready(r) => r,
             RecordCell::Moved(m) => m.source(),
+            RecordCell::Held(h) => h.record(std::panic::Location::caller()),
         }
     }
 
@@ -123,6 +131,8 @@ impl RecordCell {
             (RecordCell::Moved(m), RecordCell::Ready(r)) | (RecordCell::Ready(r), RecordCell::Moved(m)) => {
                 m.made.get().is_some_and(|made| std::sync::Arc::ptr_eq(made, r))
             }
+            (RecordCell::Held(a), RecordCell::Held(b)) => std::sync::Arc::ptr_eq(a, b),
+            (RecordCell::Held(_), _) | (_, RecordCell::Held(_)) => false,
         }
     }
 
@@ -131,6 +141,7 @@ impl RecordCell {
         match self {
             RecordCell::Ready(r) => std::sync::Arc::as_ptr(r) as usize,
             RecordCell::Moved(m) => std::sync::Arc::as_ptr(m) as *const u8 as usize,
+            RecordCell::Held(h) => std::sync::Arc::as_ptr(h) as *const u8 as usize,
         }
     }
 
@@ -158,6 +169,7 @@ impl RecordCell {
                 }
                 (ready, Some(h.finish()))
             }
+            RecordCell::Held(h) => (Some(std::sync::Arc::as_ptr(h) as *const u8 as usize), None),
         }
     }
 
@@ -165,7 +177,7 @@ impl RecordCell {
     pub(crate) fn lazy(&self) -> Option<&LazyMove> {
         match self {
             RecordCell::Moved(m) => Some(m),
-            RecordCell::Ready(_) => None,
+            RecordCell::Ready(_) | RecordCell::Held(_) => None,
         }
     }
 
@@ -177,6 +189,7 @@ impl RecordCell {
 
 impl std::ops::Deref for RecordCell {
     type Target = Brep;
+    #[track_caller]
     fn deref(&self) -> &Brep {
         self.arc()
     }
@@ -857,8 +870,35 @@ impl Body {
     }
 
     /// The body's record: faces, edges and vertices in the body's own order. Empty for a mesh body.
+    /// For a body another kernel holds, made from it the first time it is read, and every read
+    /// counted where it was asked ([`crate::record_reads`]).
+    #[track_caller]
     pub fn record(&self) -> &Brep {
-        &self.record
+        self.record.arc()
+    }
+
+    /// A body another kernel holds in its own form ([`solidcraft_kernel_api::HeldBody`]): it
+    /// stays there, and its record is made only when something reads it ([`Body::record`]).
+    pub fn held(body: std::sync::Arc<dyn solidcraft_kernel_api::HeldBody>) -> Body {
+        Body { record: RecordCell::Held(std::sync::Arc::new(crate::held::HeldCell::new(body))), size: 0.0, ..Body::bare(empty_record(), None) }
+    }
+
+    /// The body as its kernel holds it, when another kernel holds it ([`Body::held`]).
+    pub fn held_body(&self) -> Option<&dyn solidcraft_kernel_api::HeldBody> {
+        match &self.record {
+            RecordCell::Held(h) => Some(&*h.body),
+            RecordCell::Ready(_) | RecordCell::Moved(_) => None,
+        }
+    }
+
+    /// For tests: whether another kernel holds this body and its record was made, and how
+    /// many times the record was read. `None` for a body no other kernel holds.
+    #[doc(hidden)]
+    pub fn held_record_reads(&self) -> Option<(bool, u64)> {
+        match &self.record {
+            RecordCell::Held(h) => Some((h.made(), h.reads())),
+            RecordCell::Ready(_) | RecordCell::Moved(_) => None,
+        }
     }
 
     /// The body in SMLib, built from its record the first time it is asked for. The record is
