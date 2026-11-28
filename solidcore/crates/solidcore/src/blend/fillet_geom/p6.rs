@@ -515,20 +515,27 @@ pub fn join_two_fillet_verts_by_curves(
     )
 }
 
-/// (Not upstream; #18204) `uv_tol`, a 3D tolerance mapped to `surface`'s parameters along
-/// u at the middle of its domain (`SmTol::MapTo2d` with the direction (1, 0)), as the same
-/// 3D tolerance maps there in the UV direction `dir`: the mapping is linear in the
-/// tolerance, so the two differ by the ratio of the mapped unit lengths. `uv_tol` itself
-/// along u, and for a surface whose unit length maps to nothing along u.
+/// (Not upstream; #18204) The tolerance in `surface`'s parameters of a gap in the UV
+/// direction `dir`: `uv_tol`, the caller's tolerance of a gap along u, times the ratio of
+/// what the 3D tolerance `tol_3d` maps to (`SmTol::MapTo2d`, at the middle of the
+/// surface's domain) in `dir` and along u. For the `uv_tol` the face maker passes, `tol_3d`
+/// mapped along u there, that is `tol_3d` mapped in `dir`. `uv_tol` itself along u, and
+/// where `tol_3d` maps to nothing along u.
 ///
 /// # Errors
 ///
 /// Those of [`map_to_2d_dir`] and of the surface's domain.
-fn uv_tol_towards(k: &Kernel, surface: &Surface, uv_tol: f64, dir: Vec2) -> Result<f64> {
+fn uv_tol_towards(
+    k: &Kernel,
+    surface: &Surface,
+    tol_3d: f64,
+    uv_tol: f64,
+    dir: Vec2,
+) -> Result<f64> {
     let mid = surface.natural_uv_domain_with_nurb(k)?.mid();
-    let along_u = map_to_2d_dir(k, 1.0, mid, Vec2::new(1.0, 0.0), surface)?;
+    let along_u = map_to_2d_dir(k, tol_3d, mid, Vec2::new(1.0, 0.0), surface)?;
     if along_u > 0.0 && along_u.is_finite() {
-        let towards = map_to_2d_dir(k, 1.0, mid, dir, surface)?;
+        let towards = map_to_2d_dir(k, tol_3d, mid, dir, surface)?;
         Ok(uv_tol * (towards / along_u))
     } else {
         Ok(uv_tol)
@@ -636,7 +643,8 @@ pub(super) fn join_two_fillet_verts_by_curves_resolved<'s>(
                 let gap_tol = match fillet_surface {
                     Some(surface) => {
                         let gap = Vec2::new(start_pnt.x - end_pnt.x, start_pnt.y - end_pnt.y);
-                        uv_tol_towards(k, surface, uv_tol, gap)?
+                        let tol_3d = crate::geom::tol::approx_tol3d(k, d3d_tolerance);
+                        uv_tol_towards(k, surface, tol_3d, uv_tol, gap)?
                     }
                     None => uv_tol,
                 };
