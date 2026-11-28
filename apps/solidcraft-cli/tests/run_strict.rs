@@ -141,3 +141,87 @@ fn a_clean_timeline_still_writes() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(std::fs::metadata(&step).unwrap().len() > 0);
 }
+
+/// `run --in B.sc --save B.sc --results` (without `--out` or `--allow-errors`) saves the
+/// updated design when `component.update_links` leaves a downstream chamfer with a lost reference,
+/// while `--out B.step` without `--allow-errors` still fails and writes nothing.
+#[test]
+fn run_update_links_saves_design_when_chamfer_loses_reference_but_refuses_step_export() {
+    let dir = Scratch::new();
+    let part_a = dir.0.join("A.sc");
+    let design_b = dir.0.join("B.sc");
+
+    let a_init = dir.0.join("a_init.json");
+    std::fs::write(
+        &a_init,
+        json!({"commands": [
+            {"command": "parameters.add", "params": {"name": "step_d", "expression": "12 mm"}},
+            {"command": "solid.cylinder", "params": {"diameter": 20, "height": 20, "body_name": "SteppedPin"}},
+            {"command": "solid.cylinder", "params": {"diameter": "step_d", "height": 10, "base": [0, 0, 20], "operation": "join", "targets": ["SteppedPin"]}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let output = cli().arg("run").arg(&a_init).arg("--save").arg(&part_a).arg("--quiet").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let b_init = dir.0.join("b_init.json");
+    std::fs::write(
+        &b_init,
+        json!({"commands": [
+            {"command": "component.insert_design", "params": {"path": &part_a, "name": "Pin"}},
+            {"command": "solid.chamfer", "params": {"edges": [[6, 0, 20]], "distance": 1, "body": "SteppedPin", "name": "Chamfer3"}},
+            {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "corner": [40, 0, 0], "body_name": "Bracket"}},
+            {"command": "solid.cylinder", "params": {"diameter": 4, "height": 12, "base": [45, 5, -1], "operation": "cut", "targets": ["Bracket"], "name": "MountHole"}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let output = cli().arg("run").arg(&b_init).arg("--save").arg(&design_b).arg("--quiet").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let a_edit = dir.0.join("a_edit.json");
+    std::fs::write(
+        &a_edit,
+        json!({"commands": [
+            {"command": "parameters.change", "params": {"name": "step_d", "expression": "20 mm"}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let output = cli().arg("run").arg(&a_edit).arg("--in").arg(&part_a).arg("--save").arg(&part_a).arg("--quiet").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let update_script = dir.0.join("update.json");
+    std::fs::write(&update_script, json!({"commands": [{"command": "component.update_links", "params": {}}]}).to_string()).unwrap();
+
+    // Exporting `--out B.step` without `--allow-errors` must still fail and write nothing.
+    let step_out = dir.0.join("B.step");
+    let failed_export =
+        cli().arg("run").arg(&update_script).arg("--in").arg(&design_b).arg("--out").arg(&step_out).arg("--results").output().unwrap();
+    assert_eq!(failed_export.status.code(), Some(1), "{}", String::from_utf8_lossy(&failed_export.stdout));
+    let stderr = String::from_utf8_lossy(&failed_export.stderr);
+    assert!(stderr.contains("Chamfer3") && stderr.contains("nothing was written"), "{stderr}");
+    assert!(!step_out.exists());
+
+    // Saving `--save B.sc` without `--out` and without `--allow-errors` must succeed.
+    let saved = cli().arg("run").arg(&update_script).arg("--in").arg(&design_b).arg("--save").arg(&design_b).arg("--results").output().unwrap();
+    assert!(saved.status.success(), "stderr: {}", String::from_utf8_lossy(&saved.stderr));
+    let results: Value = serde_json::from_slice(&saved.stdout).unwrap();
+    assert_eq!(results[0]["updated"], json!(["Pin"]), "{results}");
+    let warnings = results[0]["warnings"].as_array().unwrap();
+    assert!(warnings.iter().filter_map(Value::as_str).any(|w| w.contains("Chamfer3")), "{results}");
+
+    // The saved B.sc holds the updated source geometry, Chamfer3 marked failed, and the rest rebuilt.
+    let inspect = cli().arg("eval").arg(&design_b).arg("--allow-errors").output().unwrap();
+    assert!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
+    let report: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    let timeline = report["timeline"].as_array().unwrap();
+    let chamfer = timeline.iter().find(|f| f["name"] == "Chamfer3").unwrap();
+    assert!(chamfer["error"].as_str().is_some_and(|e| e.contains("no longer exists") && e.contains("reselect")), "{timeline:?}");
+    let mount_hole = timeline.iter().find(|f| f["name"] == "MountHole").unwrap();
+    assert!(mount_hole["error"].is_null(), "{timeline:?}");
+    let expected_volume = std::f64::consts::PI * 100.0 * 30.0 + (1000.0 - std::f64::consts::PI * 4.0 * 10.0);
+    let actual_volume = report["total"]["volume_mm3"].as_f64().unwrap();
+    assert!((actual_volume - expected_volume).abs() < 1.0, "expected {expected_volume}, got {actual_volume}");
+}

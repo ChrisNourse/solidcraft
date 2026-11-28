@@ -605,7 +605,27 @@ fn print_file_warnings(path: &str, reply: &Value) {
 /// Run `script`, read from `path`, on `s`. At the warn level each step's `param_warnings` go to
 /// stderr as the step completes, even when a later step fails (stdout stays the caller's).
 fn run_script_warning(s: &mut Session, path: &str, script: &Value) -> Result<Vec<Value>, String> {
-    s.run_script_each(script, &mut |step, r| print_param_warnings(path, step, r)).map_err(|e| e.to_string())
+    run_script_noting(s, path, script, &mut Vec::new())
+}
+
+/// [`run_script_warning`], also keeping in `lost` what each `component.update_links` step
+/// warned about (a feature that newly fails after the update, as `<feature>: <error>`).
+fn run_script_noting(s: &mut Session, path: &str, script: &Value, lost: &mut Vec<String>) -> Result<Vec<Value>, String> {
+    s.run_script_each(script, &mut |step, r| {
+        print_param_warnings(path, step, r);
+        note_lost_references(r, lost);
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// The warnings of a `component.update_links` result that updated something, added to `lost`.
+/// Such a result says which timeline features the update left failing, each as
+/// `<feature>: <error>`; any other result adds nothing.
+fn note_lost_references(r: &Value, lost: &mut Vec<String>) {
+    let updated = r.get("updated").and_then(Value::as_array).is_some_and(|u| !u.is_empty());
+    if updated && r.get("unchanged").is_some_and(Value::is_array) {
+        lost.extend(r.get("warnings").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+    }
 }
 
 /// Step `step`'s `param_warnings` and plugin warnings on stderr, one per line, named after the script at `path`.
@@ -759,6 +779,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let script = path.is_some_and(|p| p == "-" || is_script(p));
     let profile = script && args.iter().any(|a| a == "--profile" || a == "--profile-out");
     let timings = profile || args.iter().any(|a| a == "--timings");
+    let mut lost = Vec::new();
     let (mut s, results) = if want_results || timings {
         // Collect every command's result or time (scripts only), then process requested files too.
         let (mut s, for_script) = match base {
@@ -780,8 +801,12 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         let script = path.ok_or(needs)?;
         let mut v = script_of(read_script_json(script)?)?;
         override_script("run", &mut v, &for_script, base.is_some())?;
-        let run =
-            s.run_script_kept(&v, timings.then_some(profile), &mut |step, r| print_param_warnings(script, step, r)).map_err(|e| e.to_string())?;
+        let run = s
+            .run_script_kept(&v, timings.then_some(profile), &mut |step, r| {
+                print_param_warnings(script, step, r);
+                note_lost_references(r, &mut lost);
+            })
+            .map_err(|e| e.to_string())?;
         let mut out = match run.timings {
             Some(mut t) => {
                 if want_results && let Some(o) = t.as_object_mut() {
@@ -803,15 +828,21 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         }
         (s, Some(out))
     } else {
-        (open_overriding(base, path, check, validation, "run", &overrides)?, None)
+        (open_overriding(base, path, check, validation, "run", &overrides, &mut lost)?, None)
     };
     // A feature that fails leaves the bodies as they were before it (a parameter change can
     // break a feature without failing the command that made it): writing them would hand out
     // the wrong part with success, so fail the run unless asked to write it anyway.
     // A feature only a newer SolidCraft can build isn't a broken design: saving the design keeps it
-    // and hands out no part. Exporting bodies without it would, so that still stops.
+    // and hands out no part. Exporting bodies without it would, so that still stops. Likewise a
+    // feature whose reference `component.update_links` just lost: the design keeps it, failed, so
+    // it can be reselected there (the update warned about it), while body files are not written.
+    let saves_only = flags(args, "--out").is_empty();
+    if !saves_only {
+        lost.clear();
+    }
     if !args.iter().any(|a| a == "--allow-errors") {
-        timeline_ok(&s, flags(args, "--out").is_empty(), "so nothing was written (--allow-errors writes the bodies anyway)")?;
+        timeline_ok(&s, saves_only, &lost, "so nothing was written (--allow-errors writes the bodies anyway)")?;
     }
     for out in flags(args, "--out") {
         let mut params = json!({"path": out});
@@ -842,6 +873,14 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         warn_if_open_elsewhere(p);
         let reply = s.execute("file.save_as", &json!({"path": p})).map_err(|e| e.to_string())?;
         print_file_warnings(p, &reply);
+    }
+    // The features the update left failing are saved failed: say so, unless asked to be quiet.
+    if saves_only && !args.iter().any(|a| a == "--quiet") && !args.iter().any(|a| a == "--allow-errors") {
+        for r in &s.model.results {
+            if let Some(e) = r.error.as_ref().filter(|e| lost.contains(&lost_text(&r.name, e))) {
+                solidcraft_engine::note!("warning: {}", lost_text(&r.name, e));
+            }
+        }
     }
     if let Some(results) = results {
         print_json(&results, json_out)?;
@@ -925,6 +964,7 @@ fn open_overriding(
     validation: solidcraft_engine::kernel::Validation,
     cmd: &str,
     overrides: &[(String, String)],
+    lost: &mut Vec<String>,
 ) -> Result<Session, String> {
     let load = |p: &str| load_with(p, check, validation);
     match (base, path) {
@@ -935,7 +975,7 @@ fn open_overriding(
             let rest = apply_known_overrides(cmd, &mut s, overrides)?;
             let mut script = script_of(read_script_json(p)?)?;
             override_script(cmd, &mut script, &rest, true)?;
-            run_script_warning(&mut s, p, &script)?;
+            run_script_noting(&mut s, p, &script, lost)?;
             Ok(s)
         }
         (Some(b), None) => {
@@ -951,7 +991,7 @@ fn open_overriding(
             let mut s = Session::default();
             s.param_check = check;
             s.set_validation(validation);
-            run_script_warning(&mut s, "-", &script)?;
+            run_script_noting(&mut s, "-", &script, lost)?;
             Ok(s)
         }
         (None, Some(p)) if !overrides.is_empty() && is_script(p) => {
@@ -960,7 +1000,7 @@ fn open_overriding(
             let mut s = Session::default();
             s.param_check = check;
             s.set_validation(validation);
-            run_script_warning(&mut s, p, &script)?;
+            run_script_noting(&mut s, p, &script, lost)?;
             Ok(s)
         }
         (None, Some(p)) => {
@@ -1139,16 +1179,24 @@ fn known_args(cmd: &str, args: &[String], valued: &[&str], switches: &[&str], po
     Ok(())
 }
 
+/// How `component.update_links` words a feature that fails after the update: `<feature>: <error>`.
+fn lost_text(name: &str, error: &str) -> String {
+    if error.starts_with(&format!("{name}: ")) { error.to_string() } else { format!("{name}: {error}") }
+}
+
 /// Every failing timeline feature, one per line, as an error that says `what_now` (what the
 /// command did about it); Ok when none fails. `run` and `eval` fail on this one rule (#11225).
 /// With `skip_newer_features`, a feature from a newer SolidCraft that this build can't rebuild
 /// doesn't count.
-fn timeline_ok(s: &Session, skip_newer_features: bool, what_now: &str) -> Result<(), String> {
+fn timeline_ok(s: &Session, skip_newer_features: bool, lost: &[String], what_now: &str) -> Result<(), String> {
     let newer = |id: u64| {
         skip_newer_features && s.doc.feature(id).is_some_and(|f| matches!(f.kind, solidcraft_engine::doc::FeatureKind::NewerFileFeature { .. }))
     };
+    // A feature `component.update_links` left failing, with the very error it warned about, is not
+    // skipped when the error has changed since: that failure is a different one.
+    let skipped = |r: &solidcraft_engine::doc::FeatureResult| newer(r.id) || r.error.as_ref().is_some_and(|e| lost.contains(&lost_text(&r.name, e)));
     let failed: Vec<String> =
-        s.model.results.iter().filter(|r| !newer(r.id)).filter_map(|r| r.error.as_ref().map(|e| format!("  {}: {e}", r.name))).collect();
+        s.model.results.iter().filter(|r| !skipped(r)).filter_map(|r| r.error.as_ref().map(|e| format!("  {}: {e}", r.name))).collect();
     if failed.is_empty() {
         return Ok(());
     }
@@ -1238,7 +1286,15 @@ fn cmd_eval(args: &[String]) -> Result<(), String> {
     )?;
     let validation = validation_flag("eval", args)?;
     let overrides = param_overrides("eval", args)?;
-    let mut s = open_overriding(flag(args, "--in"), positional(args), solidcraft_engine::schema::ParamCheck::Off, validation, "eval", &overrides)?;
+    let mut s = open_overriding(
+        flag(args, "--in"),
+        positional(args),
+        solidcraft_engine::schema::ParamCheck::Off,
+        validation,
+        "eval",
+        &overrides,
+        &mut Vec::new(),
+    )?;
     let m = s.execute("inspect.measure", &json!({})).map_err(|e| e.to_string())?;
     let d = s.execute("document.inspect", &json!({})).map_err(|e| e.to_string())?;
     let mut out = json!({
@@ -1262,7 +1318,7 @@ fn cmd_eval(args: &[String]) -> Result<(), String> {
     // good one. `--allow-errors` keeps status 0 for a design inspected on purpose. A newer
     // file's features are reported under `newer_file`, not counted as failures.
     if !args.iter().any(|a| a == "--allow-errors") {
-        timeline_ok(&s, true, "so eval exits with status 1 (the report lists them; --allow-errors exits 0)")?;
+        timeline_ok(&s, true, &[], "so eval exits with status 1 (the report lists them; --allow-errors exits 0)")?;
     }
     Ok(())
 }
@@ -1371,6 +1427,7 @@ fn cmd_snapshot(args: &[String]) -> Result<(), String> {
         solidcraft_engine::kernel::Validation::default(),
         "snapshot",
         &overrides,
+        &mut Vec::new(),
     )?;
     // How the bodies are drawn and where the model is cut, through the commands the app's
     // Appearance dialog and Section Analysis run (`preview`).
