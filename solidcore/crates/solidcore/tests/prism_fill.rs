@@ -1033,11 +1033,15 @@ fn blended_toes_where_the_sides_beyond_do_not_run_along_the_chord_are_refused() 
         }
     );
     assert_eq!(fit, None);
-    // offset plates: the right one 2 lower
+    // offset plates too far apart in level for the blend: the right one 4 lower, an overlap of 2
+    // and a crest of 1 give the right blend no circle tangent to its plate and the crest's arc
     let (l0, lb) = (p(-(G / 2.0 + 8.0 * tan(30.0)), 0.0), p(-G / 2.0, -8.0));
-    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
-    let (why, _) = refused(&Case {
-        face: blended,
+    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -4.0), p(G / 2.0, -12.0));
+    let (why, fit) = refused(&Case {
+        face: Contour::ConvexBlended {
+            height: 1.5,
+            overlap: 2.0,
+        },
         depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     });
@@ -1047,29 +1051,7 @@ fn blended_toes_where_the_sides_beyond_do_not_run_along_the_chord_are_refused() 
             side: FillSide::Face
         }
     );
-    // plates of unequal thickness, faces flush: blended toes on the face build, on the second
-    // face (root sides 2 apart) they are refused
-    let (l0, lb) = (p(-(G / 2.0 + 10.0 * tan(30.0)), 0.0), p(-G / 2.0, -10.0));
-    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), 0.0), p(G / 2.0, -8.0));
-    let unequal = Case {
-        depth_normal: Some(Vec2::new(0.0, 1.0)),
-        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
-    };
-    assert!(run(&Case {
-        face: blended,
-        ..unequal.clone()
-    })
-    .is_ok());
-    let (why, _) = refused(&Case {
-        second_face: Some(blended),
-        ..unequal
-    });
-    assert_eq!(
-        why,
-        FillFailure::BlendedToesOffChord {
-            side: FillSide::Second
-        }
-    );
+    assert_eq!(fit, None);
     // below the blended toes' height floor (about 5 here, 2e5 wide) without a depth normal:
     // refused as off the chord, not with a height fit that would be refused off the chord
     // (CodeRabbit on #18947)
@@ -2089,4 +2071,170 @@ fn very_wide_blends_and_near_flat_walls_build_or_refuse_with_a_fit_that_builds()
         }
     }
     assert!(refused_fits.is_empty(), "{refused_fits:?}");
+}
+
+/// Every point of a section's loop sampled along its lines and arcs.
+fn samples(w: &Filled, n: u32) -> Vec<Point2> {
+    w.region
+        .outer
+        .segs
+        .iter()
+        .flat_map(|seg| (0..=n).map(move |i| seg.point_at(f64::from(i) / f64::from(n))))
+        .collect()
+}
+
+/// Whether the loop of `w` has a corner at `at` (within 1e-9).
+fn has_corner(w: &Filled, at: Point2) -> bool {
+    w.region
+        .outer
+        .segs
+        .iter()
+        .any(|seg| seg.start().distance(at) < 1e-9)
+}
+
+/// The arcs of `w` that meet each other share their tangent there (the face is smooth).
+fn smooth_arcs(w: &Filled) {
+    let segs = &w.region.outer.segs;
+    for (s, t) in segs.iter().zip(segs.iter().cycle().skip(1)) {
+        if let (Seg2::Arc { .. }, Seg2::Arc { .. }) = (s, t) {
+            let (d1, d2) = (tangent_at(s, 1.0), tangent_at(t, 0.0));
+            assert!(s.end().distance(t.start()) < 1e-12);
+            assert!(
+                (d1.x * d2.y - d1.y * d2.x).abs() < 1e-9 && d1.x * d2.x + d1.y * d2.y > 0.0,
+                "a kink where arcs meet"
+            );
+        }
+    }
+}
+
+/// T142 (brett19's point 3 on #18947): blended toes on plates not level, the right one 2 lower,
+/// and on the root side of plates of unequal thickness (10 and 8, faces flush). Each blend runs
+/// out the overlap along its own plate's surface, ends tangent to it, and meets the crest's arc
+/// smoothly; the crest stands its height off the chord.
+#[test]
+fn blended_toes_on_sides_at_two_levels_are_tangent_to_each_side() {
+    let (h, o) = (1.5, 2.0);
+    let (l0, lb) = (p(-(G / 2.0 + 8.0 * tan(30.0)), 0.0), p(-G / 2.0, -8.0));
+    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
+    let w = section(&Case {
+        face: Contour::ConvexBlended {
+            height: h,
+            overlap: o,
+        },
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
+    });
+    // the run-outs end on each plate's surface, o past its toe
+    assert!(has_corner(&w, p(l0.x - o, 0.0)) && has_corner(&w, p(r0.x + o, -2.0)));
+    let pts = samples(&w, 4096);
+    let (lo_x, hi_x) = pts
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), q| (a.min(q.x), b.max(q.x)));
+    assert!((lo_x - (l0.x - o)).abs() < 1e-9 && (hi_x - (r0.x + o)).abs() < 1e-9);
+    // nothing of the face dips below either plate's surface beside the groove
+    assert!(pts.iter().filter(|q| q.x < l0.x).all(|q| q.y >= -1e-9));
+    assert!(pts
+        .iter()
+        .filter(|q| q.x > r0.x)
+        .all(|q| q.y >= -2.0 - 1e-9));
+    // the crest: h off the chord
+    let chord = r0 - l0;
+    let up = Vec2::new(-chord.y, chord.x) * (1.0 / chord.length());
+    let top = pts
+        .iter()
+        .map(|q| (*q - l0).dot(up))
+        .fold(f64::MIN, f64::max);
+    assert!(top <= h + 1e-9 && top > h - 1e-6, "crest {top}");
+    smooth_arcs(&w);
+    // each blend leaves its run-out along the plate (its tangent there level)
+    let arcs: Vec<&Seg2> = w
+        .region
+        .outer
+        .segs
+        .iter()
+        .filter(|seg| matches!(seg, Seg2::Arc { .. }))
+        .collect();
+    assert_eq!(arcs.len(), 3);
+    for (arc, t) in [(arcs[0], 0.0), (arcs[2], 1.0)] {
+        assert!(tangent_at(arc, t).y.abs() < 1e-9, "{arc:?}");
+    }
+
+    // the root side of plates of unequal thickness: the second face blended, 1 high, 1 past each
+    // root toe along that plate's underside
+    let (l0, lb) = (p(-(G / 2.0 + 10.0 * tan(30.0)), 0.0), p(-G / 2.0, -10.0));
+    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), 0.0), p(G / 2.0, -8.0));
+    let w = section(&Case {
+        second_face: Some(Contour::ConvexBlended {
+            height: 1.0,
+            overlap: 1.0,
+        }),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
+    });
+    assert!(has_corner(&w, p(rb.x + 1.0, -8.0)) && has_corner(&w, p(lb.x - 1.0, -10.0)));
+    smooth_arcs(&w);
+}
+
+/// Review on #23749: a crest 0.001 over a chord 2000 long (its arc's radius about 5e8), the
+/// right toe 0.001 lower, blends running 0.1 out. Taken about the arc's centre the blends' radii
+/// are lost to cancellation (one came out 113792 against 44448); taken about its top they keep
+/// it. The exact radii from a 60-digit evaluation of the same construction:
+/// 44448.3950179544266 (left) and 48004.6079815838692 (right).
+#[test]
+fn a_two_level_blend_keeps_its_radius_under_a_large_crest_arc() {
+    let w = section(&Case {
+        face: Contour::ConvexBlended {
+            height: 0.001,
+            overlap: 0.1,
+        },
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(
+            vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+            vec![line(p(1000.0, -0.001), p(999.0, -8.0))],
+        )
+    });
+    // the loop runs reversed: the right blend first, the left one last
+    let radii: Vec<f64> = w
+        .region
+        .outer
+        .segs
+        .iter()
+        .filter_map(|seg| match *seg {
+            Seg2::Arc { radius, .. } => Some(radius),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radii.len(), 3, "{radii:?}");
+    for (got, want) in [
+        (radii[0], 48_004.607_981_583_87),
+        (radii[2], 44_448.395_017_954_43),
+    ] {
+        assert!((got - want).abs() <= 1e-9 * want, "{got} != {want}");
+    }
+}
+
+/// Review on #23749: toes 2000 apart, the right one 2 lower, a crest asked 1e-4 high with
+/// blends 1 out. Too shallow for an arc, but the fit that would be offered (about 5e-4) gives one
+/// blend no circle: refused as blended toes the sides cannot take, with no fit, rather than with
+/// a fit that does not build.
+#[test]
+fn a_two_level_fit_the_blends_cannot_take_is_not_offered() {
+    let (why, fit) = refused(&Case {
+        face: Contour::ConvexBlended {
+            height: 1e-4,
+            overlap: 1.0,
+        },
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(
+            vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+            vec![line(p(1000.0, -2.0), p(999.0, -8.0))],
+        )
+    });
+    assert_eq!(
+        why,
+        FillFailure::BlendedToesOffChord {
+            side: FillSide::Face
+        }
+    );
+    assert_eq!(fit, None);
 }
