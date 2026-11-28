@@ -765,10 +765,11 @@ pub fn face_hits(k: &Kernel, b: &mut Brep, ray: Ray) -> Result<Vec<FaceHit>> {
 /// [`Extent3d::meets_ray`]'s margin for `reach`, which is ten times `reach` at least. No point
 /// of the ray is then within `reach` of the face, so [`face_hits`]' solves of it would find
 /// neither a point nor a stretch. The box of a face on a plane is that of its vertices and
-/// edges ([`qf1::calculate_bounding_box`]): the face lies between them. That of any other
-/// face is its surface's certified box over the face's UV domain
-/// ([`Surface::certified_bounding_box`]), the domain the solves run over. Only ever a saving:
-/// a face with no such box, or an empty one, is not ruled out.
+/// edges ([`qf1::calculate_bounding_box`]), grown by the face's tolerance as the B-rep's box
+/// grows it ([`calculate_bounding_box`]): the face lies between its edges, which may lie off
+/// its plane by that much. That of any other face is its surface's certified box over the
+/// face's UV domain ([`Surface::certified_bounding_box`]), the domain the solves run over.
+/// Only ever a saving: a face with no such box, or an empty one, is not ruled out.
 ///
 /// # Errors
 ///
@@ -778,7 +779,13 @@ fn ray_clear_of_face(k: &Kernel, b: &Brep, f: FaceId, ray: Ray, reach: f64) -> R
         return Ok(false);
     };
     let face_box = if matches!(surface.kind(), SurfaceKind::Plane(_)) {
-        qf1::probe(qf1::calculate_bounding_box(k, b, f, false))?
+        let Some(tolerance) = qf1::probe(face::p2::tolerance(b, f))? else {
+            return Ok(false);
+        };
+        qf1::probe(qf1::calculate_bounding_box(k, b, f, false))?.map(|mut face_box| {
+            face_box.expand_absolute(tolerance.max(0.0));
+            face_box
+        })
     } else {
         let Some(domain) = qf1::probe(face::p2::uv_domain(b, f))? else {
             return Ok(false);
@@ -2837,9 +2844,12 @@ mod tests {
     /// of the four faces beside it and meets the two it is not clear of; 0.005 outside the
     /// side y = 5 (y = 5.005, within the margin of ten times the solves' 0.001) it is clear
     /// of the far side and of the bottom and top only, and meets nothing; 0.02 outside it is
-    /// clear of all six. Along +x at z = 10 past the radius-5 cylinder about z from 0 to 20:
-    /// at y = 3 the ray is clear of both caps and meets the side, twice; at y = 12, past the
-    /// side's control net, it is clear of all three.
+    /// clear of all six. With a tolerance of 0.5 on each of its faces (their edges keep
+    /// theirs), the ray 0.3 outside that side is clear of the far side, the bottom and the
+    /// top only: a planar face's box is grown by its tolerance. Along +x at z = 10 past the
+    /// radius-5 cylinder about z from 0 to 20: at y = 3 the ray is clear of both caps and
+    /// meets the side, twice; at y = 12, past the side's control net, it is clear of all
+    /// three.
     #[test]
     fn a_ray_is_clear_of_the_faces_whose_boxes_it_passes() {
         let mut k = Kernel::default();
@@ -2872,6 +2882,16 @@ mod tests {
         assert_eq!(near_and_met(&k, &mut block, 0.0, 5.0), (2, 2));
         assert_eq!(near_and_met(&k, &mut block, 5.005, 5.0), (3, 0));
         assert_eq!(near_and_met(&k, &mut block, 5.02, 5.0), (0, 0));
+        let faces = bp1::faces(&block, None).unwrap();
+        for &f in &faces {
+            face::p3::set_tolerance(&mut block, f, 0.5, true, false).unwrap();
+        }
+        let ray = Ray::new(Point3::new(-20.0, 5.3, 5.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        let near = faces
+            .iter()
+            .filter(|&&f| !ray_clear_of_face(&k, &block, f, ray, CURVE_TOLERANCE).unwrap())
+            .count();
+        assert_eq!(near, 3);
         let mut cylinder =
             crate::primitive::api_primitives::create_cylinder(&mut k, Point3::ZERO, 5.0, 20.0)
                 .unwrap();
