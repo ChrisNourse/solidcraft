@@ -4811,6 +4811,68 @@ fn an_emboss_apart_from_its_body_says_it_left_two_pieces() {
     assert!(warning.contains("deboss changed nothing") && !warning.contains("separate pieces"), "{reply}");
 }
 
+/// #23673: a Rib and a raised Cell Grid join as an Emboss does, with no operation to pick, so one
+/// drawn beside the 20 mm box A leaves A in pieces and says so, without the New Body hint neither
+/// window has. Drawn on A, each makes one piece and says nothing. A Thicken, which picks its
+/// operation, keeps its warning and hint.
+#[test]
+fn a_rib_or_raised_cell_grid_apart_from_its_body_says_it_left_pieces() {
+    let apart = |n: usize| format!("the joined piece doesn't touch `A`, so `A` is now in {n} separate pieces");
+    let on_box = |plane: Value| {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 20, "corner": [0, 0, 0], "body_name": "A"}));
+        run(&mut s, "sketch.create", json!({"plane": plane, "name": "S"}));
+        s
+    };
+    let pieces = |s: &Session| s.model.state().body("A").map_or(0, |b| b.body.lumps().map_or(0, |l| l.len()));
+    for (from, want) in [([40, 0], Some(2)), ([20, 10], None)] {
+        let mut s = on_box(json!("XY"));
+        run(&mut s, "sketch.line", json!({"points": [from, [from[0] + 20, from[1]]], "ids": ["r1"]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let reply = run(&mut s, "solid.rib", json!({"sketch": "S", "curves": ["r1"], "thickness": 2, "depth": 5}));
+        let warning = reply["warning"].as_str().unwrap_or_default();
+        match want {
+            Some(n) => {
+                assert!(warning.contains(&apart(n)) && !warning.contains("New Body"), "rib from {from:?}: {reply}");
+                assert_eq!(s.model.results.last().and_then(|r| r.warning.as_deref()), reply["warning"].as_str());
+            }
+            None => assert!(!warning.contains("separate pieces"), "rib from {from:?}: {reply}"),
+        }
+        assert_eq!(pieces(&s), want.unwrap_or(1), "rib from {from:?}");
+    }
+    for (plane, x0, apart_from_a) in [(json!("XY"), 40, true), (json!({"origin": [0, 0, 20], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}), 0, false)] {
+        let mut s = on_box(plane);
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [x0, 0], "p1": [x0 + 20, 20]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let grid = json!({"sketch": "S", "size": 4, "web": 1, "depth": 3, "mode": "raised", "targets": ["A"]});
+        let reply = run(&mut s, "solid.cell_grid", grid);
+        let warning = reply["warning"].as_str().unwrap_or_default();
+        let n = pieces(&s);
+        if apart_from_a {
+            assert!(n > 2 && warning.contains(&apart(n)) && !warning.contains("New Body"), "grid at x {x0}: {n} pieces, {reply}");
+        } else {
+            assert!(n == 1 && !warning.contains("separate pieces"), "grid at x {x0}: {n} pieces, {reply}");
+        }
+    }
+    // A Mirror rebuilds a Rib at its copy: a Rib on A mirrored across x = 40 lands apart from A,
+    // and says so without the hint. (A Mirror refuses a Cell Grid.)
+    let mut s = on_box(json!("XY"));
+    run(&mut s, "sketch.line", json!({"points": [[20, 10], [30, 10]], "ids": ["r1"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.rib", json!({"sketch": "S", "curves": ["r1"], "thickness": 2, "depth": 5, "name": "Rib"}));
+    let reply = run(&mut s, "solid.mirror", json!({"features": ["Rib"], "plane": {"origin": [40, 0, 0], "normal": [1, 0, 0]}}));
+    let warning = reply["warning"].as_str().unwrap_or_default();
+    assert!(pieces(&s) == 2 && warning.contains(&apart(2)) && !warning.contains("New Body"), "mirrored rib: {reply}");
+
+    let mut s = on_box(json!("XY"));
+    run(&mut s, "sketch.line", json!({"points": [[40, 0], [60, 0]], "ids": ["l1"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.extrude", json!({"sketch": "S", "curves": ["l1"], "distance": 10, "body_name": "Sheet"}));
+    let reply = run(&mut s, "surface.thicken", json!({"bodies": ["Sheet"], "thickness": 2, "operation": "join", "targets": ["A"]}));
+    let warning = reply["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains(&apart(2)) && warning.contains("(New Body makes it a body of its own)"), "{reply}");
+}
+
 /// #6612: an explicitly fixed face extrusion stays on its fixed plane even when the converted
 /// mesh also supports dynamic attachments. A 20 x 20 x 10 block with a bore of
 /// radius 3, through STL and Convert Mesh, joined 5 up from its top face.

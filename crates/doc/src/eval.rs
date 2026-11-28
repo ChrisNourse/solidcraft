@@ -8959,8 +8959,9 @@ fn track_altered_sheets(before: &ModelState, after: &mut ModelState, f: &Feature
 }
 
 /// A Join whose material meets none of its targets still joins it, to the first target as a
-/// separate piece (see `apply_traced`), and so does an Emboss, which raises its profiles with a Join
-/// and has no operation to pick (#23375): a valid body in several pieces, but rarely what was meant
+/// separate piece (see `apply_traced`), and so do an Emboss (#23375), a Rib, a Mirror of a Rib and
+/// a raised Cell Grid, which join with no operation to pick (#23673): a valid body in several
+/// pieces, but rarely what was meant
 /// when Join was left on by mistake. Says so when a feature's Join leaves the bodies it changed
 /// in more pieces than they had (#4434). Combine joins the bodies it is given, apart or not.
 fn note_join_apart(doc: &Document, before: &ModelState, after: &ModelState, f: &Feature, warning: &mut Option<String>) {
@@ -8968,12 +8969,18 @@ fn note_join_apart(doc: &Document, before: &ModelState, after: &ModelState, f: &
     if bodies.is_empty() && features.iter().filter_map(|id| doc.feature(id.0)).any(|source| {
         !source.suppressed && matches!(source.kind, FeatureKind::Extrude { operation: Operation::Join, .. })
     }));
-    let emboss = matches!(&f.kind, FeatureKind::Emboss { deboss: false, .. });
-    if feature_operation(f) != Some(Operation::Join) && !mirrored_join && !emboss {
+    let picked_join = feature_operation(f) == Some(Operation::Join) || mirrored_join;
+    // An Emboss, a Rib and a raised Cell Grid join with no operation to pick, and a Mirror of a
+    // Rib joins its copies the same way (#23673).
+    let always_joins = |g: &Feature| feature_operation(g).is_none() && feature_op(g).0 == Operation::Join;
+    let mirrored_fixed = matches!(&f.kind, FeatureKind::Mirror { features, bodies, .. }
+        if bodies.is_empty() && features.iter().filter_map(|id| doc.feature(id.0)).any(|source| !source.suppressed && always_joins(source)));
+    let fixed_join = matches!(&f.kind, FeatureKind::Emboss { deboss: false, .. }) || feature_op(f).0 == Operation::Join || mirrored_fixed;
+    if !picked_join && !fixed_join {
         return;
     }
-    // The Emboss window has no New Body to point to.
-    let hint = if emboss { "" } else { " (New Body makes it a body of its own)" };
+    // Only a window with an operation to pick has a New Body to point to.
+    let hint = if picked_join { " (New Body makes it a body of its own)" } else { "" };
     for (name, n) in join_pieces_added(before, after) {
         append_warning(warning, format!("the joined piece doesn't touch `{name}`, so `{name}` is now in {n} separate pieces{hint}"));
     }
