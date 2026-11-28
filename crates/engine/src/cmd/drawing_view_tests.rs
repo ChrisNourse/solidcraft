@@ -5347,7 +5347,7 @@ fn a_full_section_through_a_stepped_bore_hatches_both_walls() {
     run(&mut s, "sketch.create", json!({"plane": "XZ"}));
     run(&mut s, "sketch.line", json!({"points": profile, "closed": true}));
     run(&mut s, "sketch.finish", json!({}));
-    run(&mut s, "solid.revolve", json!({"axis": "z", "operation": "new", "body_name": "Bore"}));
+    run(&mut s, "solid.revolve", json!({"axis": "y", "operation": "new", "body_name": "Bore"}));
     run(&mut s, "drawing.create", json!({}));
     let made = run(&mut s, "drawing.view.base", json!({"sheet": "Sheet 1", "view": "top", "scale": "1:1", "position_mm": [150, 150]}));
     let line = json!({"kind": "full", "points": [[-20.0, 0.0], [20.0, 0.0]], "arrows": "right"});
