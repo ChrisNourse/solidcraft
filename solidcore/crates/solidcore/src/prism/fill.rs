@@ -448,32 +448,28 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
         ));
     }
     let face_floor;
-    (shallow_options.face, face_floor) = shallow(
-        FillSide::Face,
-        l0,
-        r0,
-        shallow_options.face,
-        zone,
-        &mut notes,
-    )?;
+    let face_asked = shallow_options.face;
+    (shallow_options.face, face_floor) =
+        shallow(FillSide::Face, l0, r0, face_asked, zone, &mut notes)
+            .map_err(|e| two_level_fit(e, FillSide::Face, l0, r0, face_asked, beside(l0, r0)))?;
     let mut second_floor = 0.0;
     if second_used {
-        let (contour, floor) = shallow(
-            FillSide::Second,
-            rb,
-            lb,
-            second(&shallow_options),
-            zone,
-            &mut notes,
-        )?;
+        let second_asked = second(&shallow_options);
+        let (contour, floor) = shallow(FillSide::Second, rb, lb, second_asked, zone, &mut notes)
+            .map_err(|e| {
+                two_level_fit(e, FillSide::Second, rb, lb, second_asked, beside(rb, lb))
+            })?;
         shallow_options.second_face = Some(contour);
         second_floor = floor;
     }
     let options = &shallow_options;
     if second_used {
-        check_face(FillSide::Second, rb, lb, second(options), eps)?;
+        check_face(FillSide::Second, rb, lb, second(options), eps).map_err(|e| {
+            two_level_fit(e, FillSide::Second, rb, lb, second(options), beside(rb, lb))
+        })?;
     }
-    check_face(FillSide::Face, l0, r0, options.face, eps)?;
+    check_face(FillSide::Face, l0, r0, options.face, eps)
+        .map_err(|e| two_level_fit(e, FillSide::Face, l0, r0, options.face, beside(l0, r0)))?;
     let second_path = if second_used {
         close_beside(rb, lb, second(options), beside(rb, lb))
     } else {
@@ -849,14 +845,11 @@ fn close_beside(p: Point2, q: Point2, contour: Contour, beside: Option<Vec2>) ->
                 Some(along) => {
                     // each blend: the circle tangent to its side `o` past its toe and to the arc
                     let out = left_normal(along);
+                    let top = at(0.0, h);
                     let blend = |toe: Point2, run: f64| {
                         let t = toe + along * run;
-                        let d = t - c_main;
-                        let r = (d.dot(d) - big * big) / (2.0 * (big - out.dot(d)));
-                        (r.is_finite() && r > 0.0).then(|| {
-                            let c = t + out * r;
-                            (c, c_main + (c - c_main) * (big / (big + r)), t)
-                        })
+                        let (r, inflect) = two_level_blend(t - top, n, out, big)?;
+                        Some((t + out * r, top + inflect, t))
                     };
                     (blend(p, -o)?, blend(q, o)?)
                 }
@@ -1248,6 +1241,54 @@ fn roots(a: f64, b: f64, c: f64) -> Vec<f64> {
         return vec![0.0];
     }
     vec![r / a, c / r]
+}
+
+/// A blend on a side at its own level (see the module's docs): the circle tangent to the side at
+/// `t` (its outward normal `out`, a unit vector) and to the crest's arc, of radius `big` and its
+/// top `top` (`w = t - top`; the arc's centre lies `big` below `top` along `n`, the chord's unit
+/// normal). Its radius `r` and where it meets the arc, from `top`; `None` where no such circle is
+/// outside the arc (`r` not finite and positive).
+///
+/// Numerics: `|T - C|² - R²` and `R - out · (T - C)` cancel badly when `R` is large (a crest low
+/// over a long chord), so both are taken about the arc's top, not its centre: `T - C = w + R n`
+/// gives `|T - C|² - R² = |w|² + 2 R (n · w)` and `R - out · (T - C) = R |out - n|² / 2 - out · w`
+/// (`out` and `n` unit vectors), with no `R²` and no `1 - out · n`; the meeting point is
+/// `R / (R + r) (w + r (out - n))` from `top`, with no `R` subtracted (review on #23749).
+fn two_level_blend(w: Vec2, n: Vec2, out: Vec2, big: f64) -> Option<(f64, Vec2)> {
+    let tilt = out - n;
+    let power = w.dot(w) + 2.0 * big * n.dot(w);
+    let reach = 0.5 * big * tilt.dot(tilt) - out.dot(w);
+    let r = power / (2.0 * reach);
+    (r.is_finite() && r > 0.0).then(|| (r, (w + tilt * r) * (big / (big + r))))
+}
+
+/// A fit offered for blended toes at two levels (`along` given) that the blends would not build at:
+/// refused as such instead, with no fit (review on #23749). Any other refusal is `err`.
+fn two_level_fit(
+    err: SolidError,
+    side: FillSide,
+    p: Point2,
+    q: Point2,
+    contour: Contour,
+    along: Option<Vec2>,
+) -> SolidError {
+    match (contour, along, err.fit()) {
+        (Contour::ConvexBlended { overlap, .. }, Some(_), Some(fit))
+            if close_beside(
+                p,
+                q,
+                Contour::ConvexBlended {
+                    height: fit.size,
+                    overlap,
+                },
+                along,
+            )
+            .is_none() =>
+        {
+            Failure::new(OP, Reason::Fill(FillFailure::BlendedToesOffChord { side })).into_error()
+        }
+        _ => err,
+    }
 }
 
 /// The arc about `center` from `p` to `q`, counter-clockwise when `ccw`, as the polyline arc

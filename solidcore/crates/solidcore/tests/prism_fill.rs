@@ -2174,3 +2174,67 @@ fn blended_toes_on_sides_at_two_levels_are_tangent_to_each_side() {
     assert!(has_corner(&w, p(rb.x + 1.0, -8.0)) && has_corner(&w, p(lb.x - 1.0, -10.0)));
     smooth_arcs(&w);
 }
+
+/// Review on #23749: a crest 0.001 over a chord 2000 long (its arc's radius about 5e8), the
+/// right toe 0.001 lower, blends running 0.1 out. Taken about the arc's centre the blends' radii
+/// are lost to cancellation (one came out 113792 against 44448); taken about its top they keep
+/// it. The exact radii from a 60-digit evaluation of the same construction:
+/// 44448.3950179544266 (left) and 48004.6079815838692 (right).
+#[test]
+fn a_two_level_blend_keeps_its_radius_under_a_large_crest_arc() {
+    let w = section(&Case {
+        face: Contour::ConvexBlended {
+            height: 0.001,
+            overlap: 0.1,
+        },
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(
+            vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+            vec![line(p(1000.0, -0.001), p(999.0, -8.0))],
+        )
+    });
+    // the loop runs reversed: the right blend first, the left one last
+    let radii: Vec<f64> = w
+        .region
+        .outer
+        .segs
+        .iter()
+        .filter_map(|seg| match *seg {
+            Seg2::Arc { radius, .. } => Some(radius),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radii.len(), 3, "{radii:?}");
+    for (got, want) in [
+        (radii[0], 48_004.607_981_583_87),
+        (radii[2], 44_448.395_017_954_43),
+    ] {
+        assert!((got - want).abs() <= 1e-9 * want, "{got} != {want}");
+    }
+}
+
+/// Review on #23749: toes 2000 apart, the right one 2 lower, a crest asked 1e-4 high with
+/// blends 1 out. Too shallow for an arc, but the fit that would be offered (about 5e-4) gives one
+/// blend no circle: refused as blended toes the sides cannot take, with no fit, rather than with
+/// a fit that does not build.
+#[test]
+fn a_two_level_fit_the_blends_cannot_take_is_not_offered() {
+    let (why, fit) = refused(&Case {
+        face: Contour::ConvexBlended {
+            height: 1e-4,
+            overlap: 1.0,
+        },
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
+        ..channel(
+            vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+            vec![line(p(1000.0, -2.0), p(999.0, -8.0))],
+        )
+    });
+    assert_eq!(
+        why,
+        FillFailure::BlendedToesOffChord {
+            side: FillSide::Face
+        }
+    );
+    assert_eq!(fit, None);
+}

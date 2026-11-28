@@ -1365,7 +1365,11 @@ fn fill_text(why: &FillFailure, fit: Option<f64>) -> String {
             format!("a convex {} {height:.2} mm high rises past half a circle across the groove", face_name(side))
         }
         FillFailure::BlendedToesOffChord { side } => {
-            format!("blended toes on the {} need the plate surfaces beside the toes to run level with the line between them", face_name(side))
+            format!(
+                "blended toes on the {} need the plates beside the toes to lie square to the joint's depth (a butt joint), at levels close \
+                 enough for this overlap and height",
+                face_name(side)
+            )
         }
         _ => why.to_string(),
     };

@@ -134,7 +134,9 @@ impl core::fmt::Display for FillFailure {
             ),
             Self::BlendedToesOffChord { side } => write!(
                 f,
-                "blended toes on a {} whose sides beyond the toes do not run along its chord",
+                "blended toes on a {} with no direction for the sides beyond its toes (no depth \
+                 normal), or with sides at levels too far apart for a blend circle tangent to a side \
+                 and the crest's arc",
                 name(side)
             ),
         }
