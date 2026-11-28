@@ -18,7 +18,7 @@
 //!
 //! Deviations: no upstream counterpart. No recursion.
 
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::kernel::Kernel;
 use crate::math::{det, Vec2, Vec3};
@@ -248,7 +248,7 @@ fn inside(prism: &Prism, p: Vec3, tolerance: f64) -> bool {
 }
 
 /// The centre and radius of a hole that is one full circle, as [`super::prism`] fits a bore.
-fn circle(hole: &Loop2) -> Option<(Vec2, f64)> {
+pub(super) fn circle(hole: &Loop2) -> Option<(Vec2, f64)> {
     match hole.segs.as_slice() {
         [Seg2::Arc {
             center,
@@ -260,9 +260,10 @@ fn circle(hole: &Loop2) -> Option<(Vec2, f64)> {
     }
 }
 
-/// Whether the loop turns one way only, a turn by less than `straight` (its sine) not counting:
-/// the outline of a convex section, which holds the segment between any two points it holds.
-fn convex(outline: &Loop2, straight: f64) -> bool {
+/// Whether the loop turns one way only, once round, a corner by less than `straight` (its angle)
+/// not counting: the outline of a convex section, which holds the segment between any two points
+/// it holds. A turn back on itself (half a turn at a corner) or a second time round is not.
+pub(super) fn convex(outline: &Loop2, straight: f64) -> bool {
     // A segment's direction where it starts and ends, and which way it turns between.
     let tangent =
         |angle: f64, sweep: f64| Vec2::new(-det::sin(angle), det::cos(angle)) * sweep.signum();
@@ -282,13 +283,19 @@ fn convex(outline: &Loop2, straight: f64) -> bool {
         }
     }
     let mut turns = ends.iter().map(|end| end.2).collect::<Vec<_>>();
-    turns.extend(
-        ends.iter()
-            .zip(ends.iter().cycle().skip(1))
-            .map(|(before, after)| before.1.cross(after.0))
-            .filter(|turn| turn.abs() > straight),
-    );
-    turns.iter().all(|&t| t >= 0.) || turns.iter().all(|&t| t <= 0.)
+    for (before, after) in ends.iter().zip(ends.iter().cycle().skip(1)) {
+        let turn = det::atan2(before.1.cross(after.0), before.1.dot(after.0));
+        if turn.abs() >= PI - straight {
+            return false;
+        }
+        if turn.abs() > straight {
+            turns.push(turn);
+        }
+    }
+    let total: f64 = turns.iter().sum();
+    let one_way = turns.iter().all(|&t| t >= 0.) || turns.iter().all(|&t| t <= 0.);
+    // The corners left out turn by at most `straight` each.
+    one_way && (total.abs() - TAU).abs() <= straight * (turns.len() + ends.len()) as f64
 }
 
 /// Whether the triangle, seen along the extrusion's axis, keeps out of each of its section's

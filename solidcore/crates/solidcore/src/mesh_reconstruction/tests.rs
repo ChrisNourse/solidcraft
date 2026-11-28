@@ -1508,6 +1508,91 @@ fn a_groove_across_a_bored_block_keeps_its_facets() {
     assert_volume(&mut k, &mut { result.body }, source, source * 1e-8);
 }
 
+/// The crossed step takes a first outline that turns one way once round, and holes that are one
+/// circle each: for those its tests that a triangle lies in the built solid are exact.
+#[test]
+fn a_crossed_solid_takes_convex_outlines_and_round_holes_only() {
+    let loop_of = |points: &[(f64, f64)]| Loop2 {
+        segs: points
+            .iter()
+            .zip(points.iter().cycle().skip(1))
+            .map(|(&(ax, ay), &(bx, by))| Seg2::Line {
+                a: Vec2::new(ax, ay),
+                b: Vec2::new(bx, by),
+            })
+            .collect(),
+    };
+    let straight = 1e-9;
+    let square = [(0., 0.), (2., 0.), (2., 2.), (0., 2.)];
+    assert!(crossed::convex(&loop_of(&square), straight));
+    let backwards: Vec<_> = square.iter().rev().copied().collect();
+    assert!(crossed::convex(&loop_of(&backwards), straight));
+    // An L: one corner turns the other way.
+    let l = [(0., 0.), (2., 0.), (2., 1.), (1., 1.), (1., 2.), (0., 2.)];
+    assert!(!crossed::convex(&loop_of(&l), straight));
+    // A spike turns back on itself; a pentagram turns one way twice round.
+    let spike = [(0., 0.), (2., 0.), (3., 0.), (2., 0.), (2., 2.), (0., 2.)];
+    assert!(!crossed::convex(&loop_of(&spike), straight));
+    let star: Vec<_> = (0..5)
+        .map(|i| {
+            let angle = f64::from(i) * 2. * TAU / 5.;
+            (det::cos(angle), det::sin(angle))
+        })
+        .collect();
+    assert!(!crossed::convex(&loop_of(&star), straight));
+    // A slot: two lines and two half circles, bulging out, or turned in at its ends.
+    for (sweep, convex) in [(PI, true), (-PI, false)] {
+        let slot = Loop2 {
+            segs: vec![
+                Seg2::Line {
+                    a: Vec2::new(0., 0.),
+                    b: Vec2::new(2., 0.),
+                },
+                Seg2::Arc {
+                    center: Vec2::new(2., 1.),
+                    radius: 1.,
+                    start: -FRAC_PI_2,
+                    sweep,
+                },
+                Seg2::Line {
+                    a: Vec2::new(2., 2.),
+                    b: Vec2::new(0., 2.),
+                },
+                Seg2::Arc {
+                    center: Vec2::new(0., 1.),
+                    radius: 1.,
+                    start: FRAC_PI_2,
+                    sweep,
+                },
+            ],
+        };
+        assert_eq!(crossed::convex(&slot, straight), convex, "{sweep}");
+    }
+    let circle = Seg2::Arc {
+        center: Vec2::new(1., 2.),
+        radius: 3.,
+        start: 0.,
+        sweep: TAU,
+    };
+    assert_eq!(
+        crossed::circle(&Loop2 { segs: vec![circle] }),
+        Some((Vec2::new(1., 2.), 3.))
+    );
+    let halves = [0., PI].map(|start| Seg2::Arc {
+        center: Vec2::new(1., 2.),
+        radius: 3.,
+        start,
+        sweep: PI,
+    });
+    assert_eq!(
+        crossed::circle(&Loop2 {
+            segs: halves.to_vec()
+        }),
+        None
+    );
+    assert_eq!(crossed::circle(&loop_of(&square)), None);
+}
+
 /// A 60 x 40 x 30 block with two bores along X (diameter 10, axes y = 13 and y = 27 at z = 15)
 /// and one along Y (diameter 6, axis x = 30, z = 15) that runs from the face y = 0 into the
 /// first and from the second out to y = 40, but not through the web between them: the first
@@ -1643,10 +1728,18 @@ fn webbed_block() -> TriMesh {
 #[test]
 fn a_web_across_a_bore_between_two_others_keeps_its_facets() {
     let web = 14. * 9. * PI - crossing_cylinders_volume(5., 3.);
-    assert!(web > 100. && web < 10000. * 0.05, "{web}");
     let mesh = webbed_block();
     let mut k = Kernel::default();
     let welded = weld(&mesh.positions, &mesh.triangles, 0.05).unwrap();
+    let area: f64 = welded
+        .triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| welded.positions[i as usize]);
+            (b - a).cross(c - a).length() * 0.5
+        })
+        .sum();
+    assert!(web > 100. && web < area * 0.05, "{web} of {area}");
     // Every extrusion is read, so what refuses the solid is the triangles' certificate.
     for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
         assert!(super::prism(&mut k, &welded, axis, 0.05, Sides::Any)
