@@ -18922,10 +18922,16 @@ fn nearest_object_face(b: &ModelBody, p: Vec3, normal: Option<Vec3>) -> Option<(
 /// cut the face away there: the copy still ends at the face the feature names, as the feature
 /// did, not at a face that later feature left at the point, such as a chamfer's slope (#17692).
 fn object_face(st: &ModelState, name: Option<&str>, p: Vec3, normal: Option<Vec3>) -> Option<(usize, usize)> {
-    if let Some(n) = name.filter(|n| !n.is_empty())
-        && let Some(hit) = crate::naming::locate_face(st, n, p)
-    {
-        return Some((hit.body, hit.face));
+    if let Some(n) = name.filter(|n| !n.is_empty()) {
+        if let Some(hit) = crate::naming::locate_face(st, n, p) {
+            return Some((hit.body, hit.face));
+        }
+        // The face split in pieces, the point maybe on none of them: its surface is theirs, not
+        // that of whichever other face is now nearest the point, such as the wall of the cut that
+        // split it (#23612).
+        if let Some(piece) = crate::name_lookup::nearest_split_face_piece(st, n, p) {
+            return Some(piece);
+        }
     }
     face_at(st, p, normal)
 }
