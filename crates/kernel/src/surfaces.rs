@@ -30,6 +30,9 @@ use crate::{KernelError, Result, record};
 impl Body {
     /// A surface body: some shell does not close (an edge bounds a face on one side only).
     pub fn is_surface(&self) -> bool {
+        if let Some(sheet) = self.held_body().and_then(|h| h.is_sheet()) {
+            return sheet;
+        }
         // Topology only: a placed copy answers from its part's record without moving its own.
         !self.is_mesh() && self.record.topology().edges.iter().any(|e| e.uses.len() == 1)
     }

@@ -262,6 +262,15 @@ impl Shared {
                 settings.clamp_position_to_monitors(zoom, event_loop);
                 viewport.builder = settings.initialize_viewport_builder(zoom, viewport.builder.clone());
                 self.restore = Some(settings);
+            } else if id == ViewportId::ROOT
+                && viewport.builder.clamp_size_to_monitor_size.unwrap_or(true)
+                && let Some(size) = viewport.builder.inner_size
+            {
+                // A window larger than the monitor crashes on some Linux systems and doesn't
+                // appear on Windows, so its first size is at most the largest monitor's, as in
+                // eframe.
+                let largest = largest_monitor_points(self.ctx.zoom_factor(), event_loop);
+                viewport.builder = viewport.builder.clone().with_inner_size(size.min(largest));
             }
             let window = match egui_winit::create_window(&self.ctx, event_loop, &viewport.builder) {
                 Ok(window) => Arc::new(window),

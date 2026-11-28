@@ -54,7 +54,7 @@ pub use dxf::Dxf;
 pub use exact::{ExactAssembled, ExactBody, ExactBound, ExactEdge, ExactExported, ExactFace, ExactHistory, ExactKind, ExactUse};
 pub use exchange::{CadirBodies, CadirFailure, CadirRead, CadirRefused, CadirWritten, Exchange};
 pub use frames::{Frames, GussetFailure, MemberRefusal, PathFailure, PathRefusal, TrimRefusal, TrimTarget};
-pub use held::HeldBody;
+pub use held::{HeldBody, HeldMesh};
 pub use hole_stacks::{HoleStacks, HoleStacksRefused};
 pub use mesh::{MeshRebuilt, MeshRefused, Meshes, ReconstructionKind};
 pub use modelling::{

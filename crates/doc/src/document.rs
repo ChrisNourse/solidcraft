@@ -508,6 +508,11 @@ pub struct Extent {
     /// Through all bodies in the direction(s) instead of `distance`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub through_all: bool,
+    /// A through-all join stops at the model's far corner along the extrude direction. Designs
+    /// saved before this carry no marker and keep the older reach (the far corner times 1.02 plus
+    /// 1 mm); new through-all extrudes save it (`format/pending/through-all-join-far-corner.rs`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_all_to_corner: bool,
     /// Two Sides as older builds read it: `distance2` goes the other way from wherever the
     /// first side went, so a negative entered distance sends it back along the normal. Saved
     /// designs from before entered distances kept their sides carry it, so they rebuild as

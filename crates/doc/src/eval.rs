@@ -1201,6 +1201,12 @@ impl ModelState {
         self.kept_separate.get(&feature).copied()
     }
 
+    /// How Frame Member `feature` finished its members' ends: each body it made with its two ends ([start, end] along
+    /// its line); none for any other feature.
+    pub fn member_ends(&self, feature: u64) -> &[crate::frame_corners::MemberEnds] {
+        self.member_ends.get(&feature).map_or(&[], Vec::as_slice)
+    }
+
     /// What dogbone `feature` relieved and skipped in this evaluation.
     pub fn dogbone_report(&self, feature: u64) -> Option<&crate::dogbone::DogboneReport> {
         self.dogbones.get(&feature)
@@ -1334,6 +1340,9 @@ pub struct ModelState {
     /// feature id), so the session keeps the names stored for their copies in their places
     /// ([`crate::Feature::pattern_pins`]).
     pattern_left_out: BTreeMap<u64, Vec<usize>>,
+    /// How each Frame Member feature finished its members' ends (by feature id, #4003): each body it made with its
+    /// two ends, a plane cut or coped, fitted or square. A cut list reads its end angles from these.
+    member_ends: BTreeMap<u64, Vec<crate::frame_corners::MemberEnds>>,
     /// For a feature saved before format 14 that split a body, a digest of the later features'
     /// picks its pieces were named by (by feature id, see [`crate::lineage::order_legacy_lumps`]):
     /// the state stands for the feature only while those picks are the same.
@@ -1421,6 +1430,7 @@ impl ModelState {
             tapered,
             kept_separate,
             pattern_left_out,
+            member_ends,
             legacy_picks,
             cut_extents,
             dogbones,
@@ -1444,6 +1454,7 @@ impl ModelState {
             tapered: tapered.clone(),
             kept_separate: kept_separate.clone(),
             pattern_left_out: pattern_left_out.clone(),
+            member_ends: member_ends.clone(),
             legacy_picks: legacy_picks.clone(),
             cut_extents: cut_extents.clone(),
             dogbones: dogbones.clone(),
@@ -4370,6 +4381,8 @@ struct ModelChange {
     kept_separate: Option<KeptSeparate>,
     /// A body Pattern's sources it left out.
     pattern_left_out: Option<Vec<usize>>,
+    /// A Frame Member's members' ends.
+    member_ends: Option<Vec<crate::frame_corners::MemberEnds>>,
     /// Where the feature found its named faces.
     named_faces: Option<Vec<Vec3>>,
     /// Cosmetic threads appended by this feature (`t.feature == feature`), in order.
@@ -4731,6 +4744,7 @@ impl ModelState {
             && self.tapered.keys().filter(|k| **k != feature).eq(before.tapered.keys().filter(|k| **k != feature))
             && others_same(&self.kept_separate, &before.kept_separate, feature)
             && others_same(&self.pattern_left_out, &before.pattern_left_out, feature)
+            && others_same(&self.member_ends, &before.member_ends, feature)
             && others_same(&self.named_faces, &before.named_faces, feature);
         if !same_rest {
             return None;
@@ -4795,6 +4809,7 @@ impl ModelState {
             tapered: self.tapered.get(&feature).cloned(),
             kept_separate: self.kept_separate.get(&feature).copied(),
             pattern_left_out: self.pattern_left_out.get(&feature).cloned(),
+            member_ends: self.member_ends.get(&feature).cloned(),
             named_faces: self.named_faces.get(&feature).cloned(),
             added_threads: Arc::from(added_threads.to_vec()),
             clear_of: Arc::from(clear_boxes),
@@ -4917,6 +4932,10 @@ impl ModelState {
         next.pattern_left_out.remove(&feature);
         if let Some(l) = &change.pattern_left_out {
             next.pattern_left_out.insert(feature, l.clone());
+        }
+        next.member_ends.remove(&feature);
+        if let Some(e) = &change.member_ends {
+            next.member_ends.insert(feature, e.clone());
         }
         next.named_faces.remove(&feature);
         if let Some(p) = &change.named_faces {
@@ -10299,10 +10318,11 @@ pub fn second_side(first: f64, negative: bool, follows_first: bool) -> f64 {
     if along { 1.0 } else { -1.0 }
 }
 
-/// Distance that reaches through every target body from the plane `start` along the normal from
-/// the sketch plane (the From Object level plus any start offset), on either side.
-pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<f64> {
-    let mut far: f64 = 0.0;
+/// How far the target bodies' exact corners reach each way from `start` along the plane normal.
+/// Both are at least zero: below the start, then above it.
+fn through_all_side_reaches(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<(f64, f64)> {
+    let mut neg: f64 = 0.0;
+    let mut pos: f64 = 0.0;
     let mut any = false;
     for b in st.bodies.iter().filter(|b| targets.is_empty() || targets.contains(&b.name)) {
         let bb = b.body.exact_bounds().map_err(|e| DocError::Invalid(e.to_string()))?;
@@ -10316,13 +10336,25 @@ pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets:
                 if i & 2 == 0 { bb.min.y } else { bb.max.y },
                 if i & 4 == 0 { bb.min.z } else { bb.max.z },
             );
-            far = far.max((plane.height(p) - start).abs());
+            let h = plane.height(p) - start;
+            if h < 0.0 {
+                neg = neg.max(-h);
+            } else {
+                pos = pos.max(h);
+            }
         }
     }
     if !any {
         return Err(DocError::Invalid("through all needs a body to cut".into()));
     }
-    Ok(far * 1.02 + 1.0)
+    Ok((neg, pos))
+}
+
+/// Distance that reaches through every target body from the plane `start` along the normal from
+/// the sketch plane (the From Object level plus any start offset), on either side.
+pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<f64> {
+    let (neg, pos) = through_all_side_reaches(st, plane, start, targets)?;
+    Ok(neg.max(pos) * 1.02 + 1.0)
 }
 
 /// The body a face-based feature applies to: by name, or the one whose surface is nearest the
@@ -13463,8 +13495,35 @@ fn feature_tools_with_constructor(
                     // The reach is a length; a negative saved distance keeps its side (#10415).
                     // Measured from where the extrude starts, so an offset leaves no side short (#16556).
                     let start = from + extent.start_offset.as_deref().map(|e| val(vals, e, Kind::Length)).transpose()?.unwrap_or(0.0);
-                    let reach = through_all_distance(st, &ss.plane, start, &crate::plain(targets))?;
-                    through_all_side(reach, val(vals, &extent.distance, Kind::Length).ok())
+                    if *operation == Operation::Join && extent.through_all_to_corner {
+                        // A join stops on the exact corner height: a margin would leave material past the model.
+                        let saved_neg = val(vals, &extent.distance, Kind::Length).is_ok_and(|saved| saved < 0.0);
+                        let (neg, pos) = through_all_side_reaches(st, &ss.plane, start, &crate::plain(targets))?;
+                        let pure_symmetric = extent.direction == crate::Direction::Symmetric && extent.distance2.is_none();
+                        let travel_negative = match extent.direction {
+                            crate::Direction::Symmetric => extent.distance2.is_some() && saved_neg,
+                            crate::Direction::Negative => !saved_neg,
+                            crate::Direction::Positive => saved_neg,
+                        };
+                        let magnitude = if pure_symmetric {
+                            neg.max(pos)
+                        } else if travel_negative {
+                            neg
+                        } else {
+                            pos
+                        };
+                        // Pointing away from the model (sketched on its far face, say): nothing lies that
+                        // way, so keep the margined reach instead of refusing valid input.
+                        let magnitude = if !pure_symmetric && !(magnitude > 0.0) {
+                            through_all_distance(st, &ss.plane, start, &crate::plain(targets))?
+                        } else {
+                            magnitude
+                        };
+                        through_all_side(magnitude, val(vals, &extent.distance, Kind::Length).ok())
+                    } else {
+                        let reach = through_all_distance(st, &ss.plane, start, &crate::plain(targets))?;
+                        through_all_side(reach, val(vals, &extent.distance, Kind::Length).ok())
+                    }
                 }
                 (None, _) => val(vals, &extent.distance, Kind::Length)?,
             };
@@ -13765,6 +13824,17 @@ fn feature_tools_with_constructor(
             };
             // A negative distance flips the side.
             let (mut lo, mut hi) = if a <= b { (a, b) } else { (b, a) };
+            if *operation == Operation::Join
+                && extent.through_all
+                && extent.through_all_to_corner
+                && direction == crate::Direction::Symmetric
+                && extent.distance2.is_none()
+                && extent.to.is_none()
+            {
+                let (neg, pos) = through_all_side_reaches(st, &ss.plane, off, &crate::plain(targets))?;
+                lo = -neg;
+                hi = pos;
+            }
             // To a curved (or slanted) face: run right through the target body, then keep what
             // lies before that face's surface, offset by the To offset along the travel
             // (`trim_to_face`, #12617). An end the offset carries back across the start, away from
@@ -14465,14 +14535,15 @@ fn feature_tools_with_constructor(
             }
             regions.iter().map(|r| Ok(tool(r, kernel::sweep_with(&ss.plane, r, &segs, &ctl)?))).collect()
         }
-        FeatureKind::Pipe { path_sketch, path, path_body, path_edges, diameter, wall, .. } => {
+        FeatureKind::Pipe { path_sketch, path, path_body, path_edges, diameter, wall, operation, .. } => {
             let r = val(vals, diameter, Kind::Length)? / 2.0;
             if !(r > 1e-6) {
                 return Err(DocError::Invalid("pipe diameter must be positive".into()));
             }
             let region = pipe_region(vals, r, wall)?;
             // Its faces are named as a sweep's caps and a cylinder's wall are (#14897).
-            let tool = |body: Body| crate::lineage::pipe_tool(body, region.outer.segs.len());
+            let own_body = *operation == Operation::NewBody;
+            let tool = |body: Body| crate::lineage::pipe_tool(body, region.outer.segs.len(), own_body);
             // The path is a chain of a body's edges (#16084), in the chain's own order, or the
             // curves of a sketch.
             let segs = match path_body {

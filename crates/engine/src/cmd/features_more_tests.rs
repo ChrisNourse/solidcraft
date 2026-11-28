@@ -5406,29 +5406,34 @@ fn a_draft_on_a_pocket_wall_beside_rounds_never_fails_with_a_bare_status() {
     }
 }
 
-/// #18541: a 3° draft of the side of an extruded closed spline outline is refused, and the
-/// refusal says what about the face it cannot handle: the side is neither a plane nor a cone or
-/// cylinder. It used to read "not supported yet: SMLib draft for this geometry". The body is
-/// left as it was.
+/// #22809 (#18541): the side of an extruded closed spline outline drafted 3° about the bottom,
+/// pulled up, narrows toward the top: the section at height z is the outline moved inward by
+/// d = z tan 3°. The signed area inside a smooth closed curve moved inward by d is
+/// A(d) = A0 - L d + pi d^2 for any such curve (Green's theorem on C + d N with C' = T, N' = -k T
+/// and a total turning of 2 pi), and here d stays below the outline's least radius of curvature,
+/// so it is the section's area: V = A0 H - L tan 3° H^2 / 2 + pi tan^2 3° H^3 / 3, with A0 and L
+/// read off the undrafted extrusion (V0 = A0 H, its area 2 A0 + L H). The issue's outline gives
+/// 36140.077 mm³. Still the three faces. It was refused: "a drafted face is neither a plane nor
+/// a cone or cylinder".
 #[test]
-fn a_draft_of_a_spline_side_is_refused_naming_what_the_face_is() {
+fn a_spline_sides_draft_narrows_each_section_by_its_inward_offset() {
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
-    let outline = [[30.0, 0.0], [22.7, 15.1], [0.0, 18.0], [-22.7, 15.1], [-30.0, 0.0], [-19.7, -13.1], [0.0, -22.0], [19.7, -13.1]];
+    let outline = [[30.0, 0.0], [20.0, 15.0], [0.0, 20.0], [-20.0, 15.0], [-30.0, 0.0], [-20.0, -15.0], [0.0, -20.0], [20.0, -15.0]];
     run(&mut s, "sketch.spline.fit_point", json!({"points": outline, "periodic": true}));
-    run(&mut s, "solid.extrude", json!({"sketch": "Outline", "distance": 25, "operation": "new", "body_name": "Base"}));
-    let shape = |s: &Session| {
-        let state = s.model.state();
-        let b = &state.body("Base").unwrap().body;
-        [b.shell_count(), b.face_count(), b.edge_count(), b.vertex_count()]
-    };
-    let (before, volume) = (shape(&s), body_volume(&s, "Base"));
-    let draft = json!({"faces": [[-30, 0, 12.5]], "angle": "3 deg", "neutral": "XY", "body": "Base"});
-    let e = s.execute("solid.draft", &draft).unwrap_err().to_string();
-    assert!(e.contains("a drafted face is neither a plane nor a cone or cylinder"), "{e}");
-    assert!(!e.contains("for this geometry"), "{e}");
-    assert_eq!(shape(&s), before);
-    assert_eq!(body_volume(&s, "Base"), volume);
+    run(&mut s, "sketch.finish", json!({}));
+    let h = 20.0_f64;
+    run(&mut s, "solid.extrude", json!({"sketch": "Outline", "distance": h, "operation": "new", "body_name": "Part"}));
+    let before = solidcraft_kernel::measure(&s.model.state().body("Part").unwrap().body).unwrap();
+    let a0 = before.volume / h;
+    let l = (before.area - 2.0 * a0) / h;
+    let t = 3.0_f64.to_radians().tan();
+    let expected = a0 * h - l * t * h * h / 2.0 + std::f64::consts::PI * t * t * h * h * h / 3.0;
+    assert!((expected - 36140.077).abs() < 1e-3, "{expected}");
+    run(&mut s, "solid.draft", json!({"faces": [[30, 0, 10]], "angle": "3 deg", "neutral": "XY", "body": "Part"}));
+    let after = solidcraft_kernel::measure(&s.model.state().body("Part").unwrap().body).unwrap();
+    assert!((after.volume - expected).abs() <= 1e-6 * expected, "{} vs {expected}", after.volume);
+    assert_eq!((after.shells, after.merged.faces), (1, 3));
 }
 
 /// #22803: a cylinder R 20 x 60 whose top edge is rounded 2, its side drafted 3° about its circle
