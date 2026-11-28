@@ -88,3 +88,10 @@ component occurrences or joined pattern results.
 
 The design stores the template as `body_name_template`, separate from the legacy
 `body_names` list of pinned names. The command parameter remains `body_names`.
+
+A copy named by a template cannot be renamed with `body.rename` (including a
+bulk rename). Change the pattern's template or clear it before renaming the copy.
+Copies without a template can be renamed as usual. Sources omitted during a
+rebuild keep their numbering slots, so later sources' copies keep their names.
+`timeline.redefine` accepts the inspected `body_name_template` as `body_names`;
+if both are supplied they must agree, and the template must be a nonempty string.

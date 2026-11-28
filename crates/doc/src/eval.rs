@@ -15541,11 +15541,11 @@ fn pattern_bodies(
         if template.trim().is_empty() {
             return Err(DocError::Invalid("body_names must be a nonempty string".into()));
         }
-        if jobs.len() > 1 && !template.contains("{i}") {
+        if bodies.len().saturating_mul(mats.len()) > 1 && !template.contains("{i}") {
             return Err(DocError::Invalid("body_names must contain {i} when creating more than one copy".into()));
         }
         let mut taken: std::collections::HashSet<String> = st.bodies.iter().map(|b| b.name.clone()).collect();
-        for i in 1..=jobs.len() {
+        for i in 1..=bodies.len().saturating_mul(mats.len()) {
             let name = template.replace("{i}", &i.to_string()).trim().to_string();
             if !taken.insert(name.clone()) {
                 return Err(DocError::Invalid(format!("Body name `{name}` is already in use")));
@@ -15579,6 +15579,10 @@ fn pattern_bodies(
         let p = match entry {
             Ok(p) => p,
             Err(PatternPrepError::Missing { error: e, .. } | PatternPrepError::WrongPlacement(e) | PatternPrepError::LeftOut(e)) => {
+                // Preparation failures keep the same template slots as transform failures.
+                for _ in 0..mats.len() {
+                    let _ = template_names.next();
+                }
                 skipped.push(n.to_string());
                 left_out.push(s);
                 first_error.get_or_insert(e);
