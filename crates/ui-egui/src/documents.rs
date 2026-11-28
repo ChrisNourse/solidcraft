@@ -175,11 +175,12 @@ struct DocView {
 
 impl DocSlot {
     fn new(session: Session) -> DocSlot {
+        let cam = Camera { frame: session.doc.view_frame, ..Camera::default() };
         DocSlot {
             session,
             autosave: None,
             big_operation: false,
-            cam: Camera::default(),
+            cam,
             pending_feature_edit: None,
             pre_sketch_cam: None,
             sketch_last_views: Default::default(),
@@ -612,6 +613,11 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot, presenting: bool) -> DocSlot {
     app.session.set_command_check(out.session.command_check());
     app.session.set_single_surface_analysis(app.preferences.single_surface_analysis);
     crate::print_face_ui::sync(&mut app.session, &app.preferences);
+    // So do the plugin approvals, the plugins turned off and the plugin limits (#23499). The
+    // incoming design's copy dates from when it was last shown, and after a control request the
+    // app saves the shown design's approvals when they differ from the preferences. No files are
+    // read here: a window popped out from another tab brings that design in for every frame.
+    crate::plugins::apply_policy(&mut app.session, &app.preferences);
     // The incoming design's plugin panels: the Model tab reads the installed plugins once, not on
     // every frame, so it no longer syncs them when the design comes to the front (#21594).
     solidcraft_engine::plugin::sync_panels(&mut app.session);
@@ -2120,7 +2126,7 @@ pub fn adopt(app: &mut SolveApp, mut session: Session) -> bool {
         crate::render_workspace::reset_document(app);
         crate::drawing_workspace::reset_document(app);
         app.session.invalidate_view(rev);
-        app.cam = Camera::default();
+        app.cam = Camera { frame: app.session.doc.view_frame, ..Camera::default() };
         app.fit_view();
         // The linked designs that changed while it was closed are read again (#9739): last, as a
         // read is taken up only by the design revision it started from.
