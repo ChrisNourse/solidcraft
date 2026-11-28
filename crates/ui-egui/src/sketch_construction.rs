@@ -301,6 +301,7 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, hits: &[Hit], at: Option<(V
             });
             if valid && !tool.picks.contains(&id) {
                 tool.picks.push(id);
+                tool.picks_dropped = false;
             }
         }
         return;
