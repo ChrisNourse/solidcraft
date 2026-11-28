@@ -8917,12 +8917,14 @@ fn note_join_apart(doc: &Document, before: &ModelState, after: &ModelState, f: &
     if bodies.is_empty() && features.iter().filter_map(|id| doc.feature(id.0)).any(|source| {
         !source.suppressed && matches!(source.kind, FeatureKind::Extrude { operation: Operation::Join, .. })
     }));
-    let emboss = matches!(&f.kind, FeatureKind::Emboss { deboss: false, .. });
-    if feature_operation(f) != Some(Operation::Join) && !mirrored_join && !emboss {
+    let picked_join = feature_operation(f) == Some(Operation::Join) || mirrored_join;
+    // An Emboss, a Rib and a raised Cell Grid join with no operation to pick (#23673).
+    let fixed_join = matches!(&f.kind, FeatureKind::Emboss { deboss: false, .. }) || feature_op(f).0 == Operation::Join;
+    if !picked_join && !fixed_join {
         return;
     }
-    // The Emboss window has no New Body to point to.
-    let hint = if emboss { "" } else { " (New Body makes it a body of its own)" };
+    // Only a window with an operation to pick has a New Body to point to.
+    let hint = if picked_join { " (New Body makes it a body of its own)" } else { "" };
     for (name, n) in join_pieces_added(before, after) {
         append_warning(warning, format!("the joined piece doesn't touch `{name}`, so `{name}` is now in {n} separate pieces{hint}"));
     }
