@@ -13,6 +13,7 @@ pub mod curve_surface_gap;
 pub mod deviation;
 pub mod distance_bound;
 pub mod edge;
+pub mod edge_contacts;
 pub mod edge_turn;
 #[cfg(test)]
 pub(crate) mod exact;
