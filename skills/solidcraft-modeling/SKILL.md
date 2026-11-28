@@ -38,6 +38,7 @@ Work the part out as numbers first. Then build it in a few large `batch` calls, 
 
   A plain number never follows a parameter.
 - **Repeats:** `solid.pattern.rectangular` takes expression spacing; `solid.mirror` takes `XY`/`XZ`/`YZ`, a construction plane or `{origin, normal}` (origin coordinates may be length expressions such as `["half", 0, 0]`). A mirror or pattern feature cannot be mirrored or patterned again.
+- **Cell grids:** `solid.cell_grid` cuts (or with `mode: raised` adds) a field of cells. `shape: sketch` repeats the one closed profile of another sketch (`cell_sketch`) on a lattice from `pitch_x`, `pitch_y`, `stagger` (0 to 1; 0.5 for brick and hexagonal layouts), `cell_angle`, `flip` and `cell_origin`; `clip` is `whole` by default for it and `snap` is refused. A pitch whose cells overlap or come nearer than `web` is refused.
 - **Edge and face picks** snap to the nearest edge or face. An edge pick farther than 5% of the body's size from every edge is refused (`the nearest edge is 15.000 mm away`). On a large body that limit is wide (about 48 mm on a 949 mm board), so compute the exact midpoint from your geometry (the vertical corner edge of a centred box is `[w/2, d/2, h/2]`).
   - Picks must be plain numbers.
   - A pick is resolved once and then follows its edge when parameters change.
@@ -65,6 +66,13 @@ Work the part out as numbers first. Then build it in a few large `batch` calls, 
 
 ## Finish
 `export {path}` writes `.step` for CAD, `.3mf`/`.stl` for printing, or `.urdf` (an assembly with joints, for robot simulators). `save {path}` writes `.sc` (`.solidcraft` files from earlier releases still open).
+
+**3D printing.** A body is exported as it lies in the model, so a part modelled standing up reaches the slicer standing up. For each body to print:
+1. Mark the flat face it prints on: `body.print_face {"body":"Body1","point":[x,y,z]}`, a point on that face.
+2. Check the marks: `body.print_faces` returns `all_set: true` when every body has one, and `lost` for a mark whose face a change removed.
+3. Export through `execute`, since the `export` tool does not pass the option: `execute {"command":"file.export","params":{"path":"part.3mf","lay_on_print_faces":true}}` (STL and 3MF only). `file.send_to_slicer` lays the bodies on their print faces without it.
+
+Each body is then written lying on its print face at Z = 0, also after later design changes. The export's `print_faces` lists the bodies it laid, and its `warnings` name each body that was written as it lies.
 
 ## Red flags
 

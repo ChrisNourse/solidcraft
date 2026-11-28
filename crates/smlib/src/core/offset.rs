@@ -17,7 +17,8 @@
 //! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
 //! a cone, and since smlib#53 a cone about the pull into the cone its generators turned make: the
 //! surface solidcore's draft gives (`draft_surface`), with its draft definition. A draft's tilted faces go in through solidcore's
-//! `SmBrep::LocalOperation` ([`local_operation`]). The capi's check that it moved some face
+//! `SmBrep::LocalOperation`, the tangent blends on them following (taken off and put back as a face
+//! offset's are, `OffsetFacesExecutive::move_onto`). The capi's check that it moved some face
 //! (`moved_faces`) marks the replacement surfaces; solidcore names a surface by its owning face, so
 //! the mark goes on the picked faces, which it stays with through the operation (solidcore#1875).
 
@@ -30,7 +31,8 @@ use solidcore::geom::vector3d::Vec3;
 use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::offset::draft::{Draft, DraftRefusal, draft_surface};
-use solidcore::offset::offset_executive::p2::{OffsetOptions, ShellOptions, local_operation_simple, offset_brep_simple};
+use solidcore::offset::offset_executive::p2::{OffsetOptions, ShellOptions, offset_brep_simple};
+use solidcore::offset::offset_faces::OffsetFacesExecutive;
 use solidcore::query::api_queries::{face_closest_point_in_shape, face_internal_point};
 use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
 use solidcore::surface::surface::SurfaceKind;
@@ -53,6 +55,7 @@ const INVALID_INPUT: i32 = 1007;
 /// Other failures pass through the blend mapper, retaining that diagnostic wherever
 /// it would otherwise give only a numeric status.
 fn status(e: SolidError) -> Error {
+    log::debug!(target: "smlib", "offset diagnostic: {e:?}");
     let diagnostic = solidcore_ops::offset::diagnostic(&e);
     match diagnostic.refusal {
         Some(error) => refused(error, diagnostic.detail),
@@ -74,8 +77,15 @@ pub(super) fn refused(error: solidcore_ops::Error, diagnostic: String) -> Error 
     match error {
         Ops::WallsTouch => Error::WallsTouch,
         Ops::WallFolds { largest } => Error::WallFolds { largest },
-        Ops::Unsupported(_) => Error::Unsupported,
-        error @ Ops::OffsetRefused { why: solidcore_ops::OffsetRefusal::Phrase { .. }, .. } => Error::Refused(error),
+        // what the kernel cannot handle, in its words, as the draft's refusals keep it (#22792)
+        error @ Ops::Unsupported(_) => Error::Refused(error),
+        error @ Ops::OffsetRefused {
+            why:
+                solidcore_ops::OffsetRefusal::Phrase { .. }
+                | solidcore_ops::OffsetRefusal::DraftConeCloses
+                | solidcore_ops::OffsetRefusal::DraftNeutralPlanePastApex,
+            ..
+        } => Error::Refused(error),
         refusal => Error::RefusedWithDiagnostic { refusal, diagnostic },
     }
 }
@@ -220,12 +230,17 @@ fn picked_faces(call: &'static str, body: &Body, points: &[[f64; 3]], tolerance:
     Ok(once)
 }
 
-/// A copy of `body` for an operation to work on (`SmApiBrepCopy`): solidcore-ops' offsets
-/// change the body they are given.
-fn working_copy(call: &'static str, body: &Body) -> Result<Body> {
+fn require_finished(call: &'static str, body: &Body) -> Result<()> {
     if body.kernel_left_unfinished() {
         return Err(Error::Internal(format!("{call}: the body was left unfinished by an earlier panic")));
     }
+    Ok(())
+}
+
+/// A copy of `body` for an operation to work on (`SmApiBrepCopy`): solidcore-ops' offsets
+/// change the body they are given.
+fn working_copy(call: &'static str, body: &Body) -> Result<Body> {
+    require_finished(call, body)?;
     ops_as(call, &[("brep", body)], offset_error, || body.copy())
 }
 
@@ -274,6 +289,17 @@ pub(crate) fn offset_faces(body: &Body, points: &[[f64; 3]], tolerance: f64, dis
     let order = w.own_order();
     ops_as(CALL, &[("brep", body)], offset_error, || solidcore_ops::offset::offset_faces(&w, &order, &picked, distance))?;
     Ok(w)
+}
+
+/// Retrim the face numbered `face` in the tagged operand, carrying that order through the copy.
+pub(crate) fn transform_face(body: &Body, face: usize, translate: [f64; 3], origin: [f64; 3], axis: [f64; 3], angle: f64) -> Result<(Body, bool)> {
+    const CALL: &str = "smlib_transform_face";
+    require_finished(CALL, body)?;
+    ops_as(CALL, &[("brep", body)], offset_error, || {
+        let (w, order) = body.copy_with_order(&body.own_order())?;
+        let changed = solidcore_ops::offset::transform_face(&w, &order, face, translate, origin, axis, angle)?;
+        Ok((w, changed))
+    })
 }
 
 /// `smlib_thicken`: a sheet thickened by `thickness` along its normals, or (symmetric) moved back
@@ -392,9 +418,9 @@ pub(super) fn moved_faces(w: &mut Brep) -> solidcore::Result<bool> {
 
 /// `smlib_draft`: its checks, the solid check, the pick, then `draft_faces`: each picked face (a
 /// plane parallel to the pull) gets a copy of its plane turned by `angle` about its line on the
-/// neutral plane, and a cylinder or cone about the pull the cone solidcore's `draft_surface` gives
-/// (tangency-labs/smlib#27); `SmBrep::LocalOperation` extends or trims the faces around them to
-/// meet the tilted surfaces.
+/// neutral plane, a cylinder or cone about the pull the cone solidcore's `draft_surface` gives
+/// (tangency-labs/smlib#27), and the side of an extrusion along the pull its ruled wall (#22809);
+/// `SmBrep::LocalOperation` extends or trims the faces around them to meet the tilted surfaces.
 pub(crate) fn draft(
     body: &Body,
     points: &[[f64; 3]],
@@ -432,20 +458,18 @@ pub(crate) fn draft(
             };
             // A cylinder or cone about the pull drafted becomes the cone solidcore's draft gives
             // (`draft_surface`: its generators turned about its circle on the neutral plane),
+            // and the side of an extrusion along the pull its certified ruled wall (#22809), each
             // carrying its draft definition, so that the local operation knows it for a draft.
-            if let SurfaceKind::Cone(_) = surf.kind_with_nurb(k)? {
+            let SurfaceKind::Plane(plane) = surf.kind_with_nurb(k)? else {
                 let Ok(the_draft) = Draft::new(p3(neutral_origin), normal, along, angle) else {
                     return Ok(Err(Error::Argument));
                 };
                 match answer(draft_surface(k, &w, f, &the_draft))? {
-                    Some(Ok(cone)) => surfaces.push(cone),
+                    Some(Ok(drafted)) => surfaces.push(drafted),
                     Some(Err(r)) => return Ok(Err(cone_refused(r))),
                     None => return Ok(Err(Error::Unsupported)),
                 }
                 continue;
-            }
-            let SurfaceKind::Plane(plane) = surf.kind_with_nurb(k)? else {
-                return Ok(Err(cannot_draft("a drafted face is neither a plane nor a cone or cylinder")));
             };
             // The face's outward normal: the plane's, turned with the outer faceuse.
             let mut n = plane.position().z_axis();
@@ -497,7 +521,15 @@ pub(crate) fn draft(
         // refuses a draft the kernel builds.
         let through = solidcore_ops::offset::drafted_through(k, &mut w, &picked, &surfaces).ok().flatten();
         mark_moved(&mut w, &picked)?;
-        if let Err(e) = called(local_operation_simple(k, &mut w, &picked, surfaces))? {
+        // The tangent blends on the drafted faces follow them (#22803): taken off, the faces
+        // drafted, put back at their sizes (solidcore's face move whose blends follow, which
+        // with no blend to follow is the local operation alone).
+        let mut exec = OffsetFacesExecutive::new();
+        let moved = exec.move_onto(k, &mut w, &picked, surfaces);
+        if let (Err(_), Some(refused)) = (&moved, solidcore_ops::offset::faces_move_refused(&exec)) {
+            return Ok(Err(offset_error("smlib_draft", refused, None)));
+        }
+        if let Err(e) = called(moved)? {
             return Ok(Err(match through {
                 Some(t) => Error::DraftCutsThrough { at: [t.at.x, t.at.y, t.at.z], depth: t.depth },
                 None => e,

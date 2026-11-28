@@ -43,8 +43,9 @@ use solidcore::SolidError;
 
 use crate::case::CaseContext;
 use crate::runner::default_cases;
-use crate::util::{p2, v3};
+use crate::util::{contact_codes, p2, v3};
 use crate::{Case, HarnessError, Output, Rng, UnitDiff};
+use solidcore::math::det;
 
 /// Generated cases per run, whatever `--seeds` says (it can only raise this).
 pub const MIN_GENERATED: usize = 2000;
@@ -272,8 +273,16 @@ fn first_leaf(tree: &Tree<Obj>) -> Result<NodeId, HarnessError> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn rust_run(i: &Inputs) -> Result<Vec<f64>, Fail> {
+    rust_run_with(i, &mut None)
+}
+
+/// [`rust_run`], also setting `contact` to the contact codes of the solution records
+/// it prints ([`contact_codes`]; for the curve op, the run with handles that know
+/// their domains, then `-9` and the opaque run's codes when the two differ, as `out`
+/// does). An op that prints no solution records leaves it `None`.
+#[allow(clippy::too_many_lines)]
+fn rust_run_with(i: &Inputs, contact: &mut Option<Vec<i64>>) -> Result<Vec<f64>, Fail> {
     let k = Kernel::default();
     let mut o = Vec::new();
     let Some(s) = surface_of(&k, &i.surface)? else {
@@ -329,6 +338,7 @@ fn rust_run(i: &Inputs) -> Result<Vec<f64>, Fail> {
                 Ok(sols) => {
                     o.push(0.0);
                     put_solutions(&mut o, &sols, None, surf);
+                    *contact = Some(contact_codes(sols.as_slice()));
                 }
                 Err(c) => o.push(c),
             }
@@ -346,11 +356,13 @@ fn rust_run(i: &Inputs) -> Result<Vec<f64>, Fail> {
             // B-rep's, which cannot reach their geometry): both must give the same result,
             // so a difference reports both runs.
             let mut runs = Vec::new();
+            let mut run_codes = Vec::new();
             for (co, so) in [
                 (curve_obj(&c), surface_obj(&s)),
                 (Obj::OpaqueCurve, Obj::OpaqueSurface),
             ] {
                 let mut r = Vec::new();
+                let mut codes = None;
                 match st(s.global_curve_intersect::<Obj>(
                     &k,
                     [co, so],
@@ -362,11 +374,23 @@ fn rust_run(i: &Inputs) -> Result<Vec<f64>, Fail> {
                     Ok(sols) => {
                         r.push(0.0);
                         put_solutions(&mut r, &sols, Some(co), so);
+                        codes = Some(contact_codes(sols.as_slice()));
                     }
                     Err(c) => r.push(c),
                 }
                 runs.push(r);
+                run_codes.push(codes);
             }
+            let opaque_codes = run_codes.pop().flatten();
+            *contact = match (run_codes.pop().flatten(), opaque_codes) {
+                (codes, opaque) if codes == opaque => codes,
+                (codes, opaque) => {
+                    let mut c = codes.unwrap_or_default();
+                    c.push(-9);
+                    c.extend(opaque.unwrap_or_default());
+                    Some(c)
+                }
+            };
             let opaque = runs.pop().unwrap_or_default();
             o = runs.pop().unwrap_or_default();
             if o != opaque {
@@ -507,8 +531,17 @@ fn rust_run(i: &Inputs) -> Result<Vec<f64>, Fail> {
 }
 
 fn rust(i: &Inputs) -> Result<Output, HarnessError> {
-    match rust_run(i) {
-        Ok(v) => Ok(Output::new().values("out", v)),
+    let mut contact = None;
+    match rust_run_with(i, &mut contact) {
+        Ok(v) => {
+            let out = Output::new().values("out", v);
+            // the solutions' contact codes, exact (`0` unclassified, `1` crossing,
+            // `2` touching, `3` undecided: `contact_codes`)
+            Ok(match contact {
+                Some(c) => out.ints("contact", c),
+                None => out,
+            })
+        }
         Err(Fail::Deferred(o)) => Ok(*o),
         Err(Fail::Harness(e)) => Err(e),
     }
@@ -1600,7 +1633,7 @@ fn gen_curve(rng: &mut Rng, scale: f64, lines: bool) -> (CrvIn, [f64; 2]) {
         if rng.chance(0.1) {
             bb = [a[0] + scale, a[1], a[2]];
         }
-        let len = ((bb[0] - a[0]).powi(2) + (bb[1] - a[1]).powi(2) + (bb[2] - a[2]).powi(2)).sqrt();
+        let len = (det::powi(bb[0] - a[0], 2) + det::powi(bb[1] - a[1], 2) + det::powi(bb[2] - a[2], 2)).sqrt();
         let hi = if rng.chance(0.5) { len } else { len * rng.uniform(0.2, 1.0) };
         return (CrvIn::Line { a, b: bb }, [0.0, hi.max(1e-3)]);
     }

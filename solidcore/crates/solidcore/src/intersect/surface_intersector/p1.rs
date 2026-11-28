@@ -134,6 +134,7 @@ use crate::geom::tol::is_zero;
 use crate::geom::vector2d::{Point2, Vec2};
 use crate::geom::vector3d::{sqrt, Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{
     max2, max3, min2, EFF_ZERO, EFF_ZERO_RAD, EFF_ZERO_SQ, EFF_ZERO_SQRT, INFINITE_PARAMETER, PI,
 };
@@ -674,6 +675,14 @@ pub struct SurfaceIntersector<'s> {
     /// surface of revolution round its axis keeps half the gap of its turn either end
     /// (WR-650).
     pub extension_closed: bool,
+    /// Not upstream (#2500, SolidCraft #19684): the curve parameter of the trace's last
+    /// through point, once the trace has reached it (the traced curve's end, where its
+    /// extension past the end begins); `None` before. The half of the gap an extension
+    /// past the end keeps when it comes back onto the start
+    /// ([`Self::extension_closed`]) is measured from there.
+    /// [`Self::last_through_parameter`] is not that point: upstream records it only while
+    /// clipping an extension of an arc ([`Self::doing_extension_clipping`]).
+    pub traced_end_parameter: Option<f64>,
     /// `m_bCurveIsClosed`.
     pub curve_is_closed: bool,
     /// Not upstream: the `trace_step` calls left to the start-point loop of
@@ -916,6 +925,7 @@ impl<'s> SurfaceIntersector<'s> {
             extension_closes_at: None,
             extension_left_closure: false,
             extension_closed: false,
+            traced_end_parameter: None,
             curve_is_closed: false,
             trace_steps_left: u64::MAX,
             start_loop_trace_steps: super::p4::MAX_START_LOOP_TRACE_STEPS,
@@ -1746,7 +1756,7 @@ impl<'s> SurfaceIntersector<'s> {
                     } else {
                         min2(1.0 / curvature, 100.0 * self.this_approx_tol_3d)
                     };
-                    let ang_tol_rad = 0.01 + self.this_approx_tol_3d.atan2(c_radius);
+                    let ang_tol_rad = 0.01 + det::atan2(self.this_approx_tol_3d, c_radius);
 
                     // status ignored upstream (a zero tangent gives an angle of 0); fork
                     // bcc6f01: an angle that cannot be computed does not meet the test.
@@ -2408,7 +2418,7 @@ pub fn is_point_on_tsect_curve(
 
     // when the angle is not exactly zero (tangent xSectCurve Segment)
     if ang > 0.0 {
-        let mut tan = (ang / 2.0).tan();
+        let mut tan = det::tan(ang / 2.0);
         if tan < 0.001 {
             tan = 0.001;
         }

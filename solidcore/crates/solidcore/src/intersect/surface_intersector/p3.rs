@@ -1719,14 +1719,21 @@ pub fn test_point_with<'s, V: super::p4::IntersectorVirtuals<'s> + ?Sized>(
     if let Some(&through) = v.intersector().through_points.first() {
         let p1 = need_prev()?;
 
+        // the step landed on the through point itself (not upstream, #21179): the test of
+        // the span leaves its ends out of its interior and takes one by its tangent's sign,
+        // which a through point does not have
+        let on_through = v.landed_on_through_point(next, through)?;
+
         // if through point is on hermite curve from pPrev1 point to rNextTSP point
-        if is_point_on_tsect_curve(
-            k,
-            v.intersector().point(through)?,
-            v.intersector().point(p1)?,
-            v.intersector().point(next)?,
-            tol,
-        )? {
+        if on_through
+            || is_point_on_tsect_curve(
+                k,
+                v.intersector().point(through)?,
+                v.intersector().point(p1)?,
+                v.intersector().point(next)?,
+                tol,
+            )?
+        {
             // modify the rNextTSP to correspond to the through point
             update_tsect_point_with(v, k, p1, next, through)?;
 
@@ -1734,10 +1741,14 @@ pub fn test_point_with<'s, V: super::p4::IntersectorVirtuals<'s> + ?Sized>(
             unlink(&mut v.intersector_mut().through_points, through);
 
             // mark the last throughParameter distance when extension clipping
-            if v.intersector().doing_extension_clipping && v.intersector().through_points.is_empty()
-            {
+            if v.intersector().through_points.is_empty() {
                 let param = v.intersector().point(through)?.curve_parameter;
-                v.intersector_mut().last_through_parameter = param;
+                // Not upstream (#2500, SolidCraft #19684): where the traced curve ends,
+                // clipping or not, for the closure of its extension past the end
+                v.intersector_mut().traced_end_parameter = Some(param);
+                if v.intersector().doing_extension_clipping {
+                    v.intersector_mut().last_through_parameter = param;
+                }
             }
 
             // remember that a through point was hit

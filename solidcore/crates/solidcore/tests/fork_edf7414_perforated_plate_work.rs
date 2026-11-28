@@ -40,6 +40,7 @@ use solidcore::geom::a_object::BooleanOperation;
 use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::kernel::UpstreamFixes;
 use solidcore::mass::integrator::properties::{brep_area, brep_volume_default};
+use solidcore::math::det;
 use solidcore::math::{Point3, Vec3};
 use solidcore::primitive::api_curves::create_line_segment;
 use solidcore::primitive::api_primitives::{create_box, create_cylinder};
@@ -239,7 +240,7 @@ fn a_plate_classifies_its_points_the_same_with_its_holes_left_out() {
             let (x, y) = (PITCH * f64::from(i), PITCH * f64::from(j));
             points.push(Point3::new(x, y, 0.0));
             for a in 0..12 {
-                let (s, c) = (f64::from(a) * PI / 6.0 + 0.1).sin_cos();
+                let (s, c) = det::sin_cos(f64::from(a) * PI / 6.0 + 0.1);
                 for d in [0.0, 0.1, -0.1, 1.0, -1.0, 10.0, -10.0] {
                     let r = RADIUS + d * tol;
                     points.push(Point3::new(x + r * c, y + r * s, 0.0));
@@ -420,15 +421,16 @@ fn plate_cut_counts(n: u32) -> (u64, u64) {
     (marked, solves)
 }
 
-/// The cut deletes the two discs each cylinder cuts out of the plate's top and bottom,
-/// and each deletion asks whether the disc's one vertex is still joined to the shell.
-/// It is, through the first face at that vertex: one face marked for each face deleted,
-/// 2 N for N holes. Walking on over the rest of the shell marked
+/// The cut deletes the two discs each cylinder cuts out of the plate's top and bottom
+/// (plus the cylinders' end caps) in one batch per operand, then reconciles each
+/// surviving shell once: 6 surviving plate faces plus N surviving cylinder walls = N + 6
+/// faces marked (31 for 25 holes, 106 for 100 holes). Per-face BFS early-exit marked
+/// 2 N (50 and 200), and walking on over the rest of the shell marked
 /// (7/2) N^2 + (23/2) N faces: 2475 for 25 holes and 36150 for 100.
 #[test]
 fn plate_cut_marks_one_face_for_each_face_it_deletes() {
     let marked = (plate_cut_counts(5).0, plate_cut_counts(10).0);
-    assert_eq!(marked, (2 * 25, 2 * 100));
+    assert_eq!(marked, (25 + 6, 100 + 6));
 }
 
 /// Each cylinder meets the plate's top and bottom in a circle: a closed proto edge that

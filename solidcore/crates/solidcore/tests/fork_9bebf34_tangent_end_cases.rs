@@ -67,6 +67,7 @@ use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::global_solver::SolverOperation;
 use solidcore::kernel::UpstreamFixes;
 use solidcore::mass::integrator::properties::{brep_volume, PropertyAttributes};
+use solidcore::math::det;
 use solidcore::math::{Point3, Vec3, BIG_DOUBLE};
 use solidcore::primitive::api_curves as curves;
 use solidcore::query::api_queries::{brep_bounding_box, get_edges};
@@ -109,7 +110,7 @@ fn extrude(k: &mut Kernel, cs: &[Curve], draft_deg: f64) -> Brep {
 /// The fork's `tangent_peg(draft)`.
 fn tangent_peg(k: &mut Kernel, draft_deg: f64) -> Brep {
     let p = Point3::new;
-    let d = 10.0 * draft_deg.to_radians().tan();
+    let d = 10.0 * det::tan(draft_deg.to_radians());
     let line = |a: Point3, b: Point3| Curve::from(curves::create_line_segment(a, b).unwrap());
     let bar = [
         line(p(0.0, 0.0, 0.0), p(40.0, 0.0, 0.0)),
@@ -322,11 +323,11 @@ fn concave_round_then_front_round_r2(k: &mut Kernel) -> Outcome {
     rounds_in_turn(k, 2.0, 2.0, false)
 }
 fn drafted_front_round_r2(k: &mut Kernel) -> Outcome {
-    let d = 10.0 * 5.0_f64.to_radians().tan();
+    let d = 10.0 * det::tan(5.0_f64.to_radians());
     one(k, 5.0, Kind::Round, &[[20.0, d, 10.0]], &[2.0], 0.0, false)
 }
 fn drafted_rounds_together_r2(k: &mut Kernel) -> Outcome {
-    let d = 10.0 * 5.0_f64.to_radians().tan();
+    let d = 10.0 * det::tan(5.0_f64.to_radians());
     let pts = [[20.0, d, 10.0], [32.0 + d, 8.0, 10.0]];
     one(k, 5.0, Kind::Round, &pts, &[2.0, 2.0], 0.0, false)
 }
@@ -371,6 +372,8 @@ fn rounds_together_r5(k: &mut Kernel) -> Outcome {
 enum Here {
     /// The fork marks it failing; it passes here.
     Passes(&'static str),
+    /// The fork marks it failing; it is refused here, for this reason.
+    Refused(&'static str),
 }
 
 /// The fork's mark of a case at cd47efd: its reason the case fails there (`None`: it
@@ -385,6 +388,7 @@ impl Mark {
     fn fails_here(&self) -> bool {
         match self.here {
             Some(Here::Passes(_)) => false,
+            Some(Here::Refused(_)) => true,
             None => self.fails_today.is_some(),
         }
     }
@@ -405,14 +409,12 @@ const PASSES: Mark = Mark {
 
 const CHAMFERS_AT_CD47EFD: &str = "status 1001: SmFillet3x2MixedConvexityCorner, Vertex Computation Failure, where the two chamfers meet at the tangent seam (the corner, not the tangent ends: each chamfer alone passes)";
 const DRAFTED_ROUNDS: &str = "status 1001 before any geometry: the corner where the front top edge runs tangent into the concave arc, on the cone, is of no kind SMLib's blend corners take";
-/// The drafted peg here is the tangent rule's (WR-521), whose
-/// arc walls are their exact cones since the fork's 3ae7bfa (WR-521's addendum of
-/// 2026-11-02), so the bar's and the disc's cone walls are one face.
-const DRAFTED_HERE: &str = "on the tangent rule's cone walls the round builds within the box and checks clean (the rounds together remove 11.97)";
 const ROUNDS_R2: &str = "the corner patch where the rounds meet stands 0.0374 out of the front face (box y min -0.0374099)";
 const ROUNDS_R5: &str = "the corner patch where the rounds meet stands 0.128 out of the front face (box y min -0.1278205)";
-const ROUNDS_R2_HERE: &str = "the rounds together build within the box and check clean, as the blend corner's Mixed corner (built in solidcore from smlib#82)";
-const ROUNDS_R5_HERE: &str = "the blend corner's Mixed corner (built in solidcore from smlib#82) builds the rounds together within the box";
+/// #22151: the rounds' corner at the cusp, the blend corner's Mixed one, is a Coons fill,
+/// no rolling ball's surface; the session refuses it at its vertex until the Roll-over
+/// build takes it.
+const ROUNDS_REFUSED_HERE: &str = "the rounds' Mixed corner is refused at the cusp (#22151)";
 const CHAMFERS_HERE: &str = "the blend corner's Mixed corner (built in solidcore from smlib#82) builds the chamfers together at the tangent seam";
 
 const TANGENT_END_CASES: [TangentEndCase; 12] = [
@@ -449,7 +451,7 @@ const TANGENT_END_CASES: [TangentEndCase; 12] = [
         run: drafted_rounds_together_r2,
         at_cd47efd: Mark {
             fails_today: Some(DRAFTED_ROUNDS),
-            here: Some(Here::Passes(DRAFTED_HERE)),
+            here: Some(Here::Refused(ROUNDS_REFUSED_HERE)),
         },
     },
     TangentEndCase {
@@ -477,7 +479,7 @@ const TANGENT_END_CASES: [TangentEndCase; 12] = [
         run: rounds_together_r2,
         at_cd47efd: Mark {
             fails_today: Some(ROUNDS_R2),
-            here: Some(Here::Passes(ROUNDS_R2_HERE)),
+            here: Some(Here::Refused(ROUNDS_REFUSED_HERE)),
         },
     },
     TangentEndCase {
@@ -485,7 +487,7 @@ const TANGENT_END_CASES: [TangentEndCase; 12] = [
         run: rounds_together_r5,
         at_cd47efd: Mark {
             fails_today: Some(ROUNDS_R5),
-            here: Some(Here::Passes(ROUNDS_R5_HERE)),
+            here: Some(Here::Refused(ROUNDS_REFUSED_HERE)),
         },
     },
 ];
@@ -533,7 +535,7 @@ fn tangent_end_marks_are_the_fork_s() {
         let differs = m.fails_here() != m.fails_today.is_some();
         match &m.here {
             None => assert!(!differs, "{}", c.name),
-            Some(Here::Passes(why)) => {
+            Some(Here::Passes(why) | Here::Refused(why)) => {
                 assert!(m.fails_today.is_some() && !why.is_empty(), "{}", c.name);
             }
         }

@@ -1058,10 +1058,25 @@ fn c1_collect_points(
     // the surface's natural domain, where its definition evaluates as an extension, not as
     // the closed surface (0.007 off on a cylinder of radius 30 at 0.008 past its seam), and
     // the round's exact surface through such feet is off its class.
-    for (srf, count) in [SrfIndex::First, SrfIndex::Second]
+    // Not upstream (tangency-labs/solidcraft#21940): nor on a base whose seam the blend's rails
+    // never cross (`RailEndNames::InDomain`: a closed edge's Join whose side seam on that base
+    // ends inside the band). Its two rail ends lie at one vertex whose trim curve names it a
+    // period apart, so one end's foot lies across from its trim curve and the other does not,
+    // yet the contact never crosses the seam: the name a period away lay outside the domain,
+    // and the trace ran on the surface's extension (0.29972 instead of 0.3 from the ball's
+    // centre).
+    let clear_of_seam = match ops.solver().rail_end_names {
+        crate::blend::fillet_solver::p1::RailEndNames::InDomain { rail } => Some(rail),
+        crate::blend::fillet_solver::p1::RailEndNames::TrimCurveSide => None,
+    };
+    for (rail, (srf, count)) in [SrfIndex::First, SrfIndex::Second]
         .into_iter()
         .zip(named_ends)
+        .enumerate()
     {
+        if clear_of_seam == Some(rail) {
+            continue;
+        }
         let on_srf = || renamed.iter().filter(move |(_, s, _)| *s == srf);
         if on_srf().count() == count {
             continue;
@@ -2357,13 +2372,13 @@ fn c3_make_intersector<'s>(
     let [domain1, domain2] = &st.trace.domains;
     // the solver (`*this`) is passed to each intersector call instead
     let mut fi = TraceIntersector::new(k, surface1, domain1, surface2, domain2, None)?;
-    // Not upstream (#2500): with `offset_extension_as_itself` an offset extends a surface
+    // Not upstream (#2500): an offset continuing as itself extends a surface
     // of revolution round its axis past the closure of its turn, so the offsets'
     // intersection can be closed (a round run onto a torus's tube meets its offset in a
     // closed oval) without repeating its UV: an extension stops where it comes back onto
     // the curve traced, compared in 3D, or it runs round past the trace's own span and the
     // fillet surface covers that span twice.
-    fi.base.base.extension_stops_on_closure = k.fixes.offset_extension_as_itself;
+    fi.base.base.extension_stops_on_closure = true;
 
     // If we need to trace beyond the end and we are tracing along an arc, put a stop
     // tracing criterion to avoid possible infinite looping (`IsArc` only runs when an
@@ -2379,10 +2394,48 @@ fn c3_make_intersector<'s>(
     Ok(fi)
 }
 
+/// The vertices a tip's rails run to.
+fn rail_far_ends(
+    fillets: &FilletBrep,
+    tip: crate::topology::VertexId,
+) -> Result<Vec<crate::topology::VertexId>> {
+    let mut ends = Vec::new();
+    for e in crate::topology::vertex::edges(fillets.brep(), tip, None)? {
+        let (a, b) = crate::topology::vertex::edge_vertex_pair(fillets.brep(), e)?;
+        ends.extend([a, b].into_iter().flatten().filter(|v| *v != tip));
+    }
+    Ok(ends)
+}
+
+/// Another blend's on-vertex tip shares a rail end with this one.
+///
+/// The tangent bore seam (#20026) chamfers two edges that meet at one point on the
+/// periodic seam: their rails start at the same pair of vertices, and each tip is
+/// on-vertex at its own original vertex. Two loft creases also each end on-vertex, but
+/// their rails are their own, and each trace still starts at its own tip. Decided on the
+/// rails' vertices, not on distances.
+fn another_on_vertex_tip_shares_a_rail_end(
+    fillets: &FilletBrep,
+    vertex: crate::topology::VertexId,
+) -> Result<bool> {
+    let ends = rail_far_ends(fillets, vertex)?;
+    for (id, other) in fillets.fillet_vertices() {
+        if id != vertex
+            && other.fillet_vertex_type()
+                == crate::blend::fillet_geom::p1::FilletVertexType::OnVertex
+            && rail_far_ends(fillets, id)?.iter().any(|v| ends.contains(v))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// :2054-2090: the trace locals (tolerances, `sDir = sPVSt[1]`); a TANGENT last point
 /// reverses `st.tsect_pnts`, sets `sDir = -sPVEn[1]` and `bReverseTracing`; the local
 /// extension flags from the solver's. Not upstream (WR-603): a TANGENT first point starts
-/// the trace toward the next point.
+/// the trace toward the next point. Not upstream (#20026): when another blend's
+/// on-vertex tip shares a rail end with this one, the trace starts at the regular end.
 fn c3_trace_start(
     ops: &mut dyn FilletSolverOps,
     cx: &mut Cx<'_>,
@@ -2398,6 +2451,11 @@ fn c3_trace_start(
 
     // Check the last TsectPnt to see if it is degenerate (at a surf/surf tangency
     // point). If so, reverse the tracing to avoid its early termination.
+    // #20026: two linear chamfers whose on-vertex tips share a rail end (the inner edges of a
+    // tangent bore seam) start at the regular end. The offsets admit more than one
+    // intersection direction there, and the regular end's edge tangent selects the
+    // branch. A loft ruling's tip is the only on-vertex point there, even when other
+    // creases are chamfered with it, and the intersection leaves along the chord.
     st.trace.reverse_tracing = false;
     let mut start_from = st.tsect_pnts.last();
     if matches!(solver.fsg, Some(super::p1::FilletSurfaceGenerator::Linear)) {
@@ -2413,10 +2471,8 @@ fn c3_trace_start(
                     if let Some(vertex) = vertex {
                         if cx.fillets.fillet_vertex(vertex)?.fillet_vertex_type()
                             == crate::blend::fillet_geom::p1::FilletVertexType::OnVertex
+                            && another_on_vertex_tip_shares_a_rail_end(cx.fillets, vertex)?
                         {
-                            // The rails meet at the original vertex. At this contact the
-                            // offsets admit multiple intersection directions. The regular
-                            // end and its edge tangent identify the intended branch.
                             start_from = Some(first);
                         }
                     }
@@ -4488,6 +4544,7 @@ mod tests_c6 {
     use super::*;
     use crate::blend::fillet_custom_solver::{ConstantRadiusAssistedFs, SurfaceId};
     use crate::intersect::surface_intersector::p1::IntersectionPointType;
+    use crate::math::det;
     use crate::nurbs::b_spline_surface::BSplineSurface;
 
     fn bilinear(p: [[f64; 3]; 4]) -> Surface {
@@ -4709,7 +4766,7 @@ mod tests_c6 {
         let r = run(&mut ops, &k, 1.0, &mut p, None);
         assert!(ops.guesses.len() >= 2, "{r:?} {:?}", ops.guesses);
         // how far each of the first two guesses lies from the point's uv
-        let from = |g: &[f64]| (g[0] - 0.5).hypot(g[1] - 0.25);
+        let from = |g: &[f64]| det::hypot(g[0] - 0.5, g[1] - 0.25);
         let (first, retry) = (from(&ops.guesses[0]), from(&ops.guesses[1]));
         assert!(first > 0.0 && first < 1.0e-4, "{first}");
         assert!((retry / first - 100.0).abs() < 1.0e-6, "{}", retry / first);
@@ -4741,7 +4798,7 @@ mod tests_c6 {
             let _ = run(&mut ops, k, 1.0, &mut p, previous);
             assert_eq!(p.point_type == IntersectionPointType::TangentPoint, tangent);
             let g = ops.guesses.first().expect("a finite-difference solve ran");
-            (g[0] - 0.5).hypot(g[1] - 0.25)
+            det::hypot(g[0] - 0.5, g[1] - 0.25)
         };
         let k = Kernel::default();
         let crossing = first_guess(&k, false);
@@ -5079,13 +5136,13 @@ pub(crate) fn point_intersection_on_surfaces(
     let [surface1, surface2] = surfaces;
     let [domain1, domain2] = &domains;
     let mut fi = TraceIntersector::new(k, surface1, domain1, surface2, domain2, None)?;
-    // Not upstream (#2500): with `offset_extension_as_itself` an offset extends a surface
+    // Not upstream (#2500): an offset continuing as itself extends a surface
     // of revolution round its axis past the closure of its turn, so the offsets'
     // intersection can be closed (a round run onto a torus's tube meets its offset in a
     // closed oval) without repeating its UV: an extension stops where it comes back onto
     // the curve traced, compared in 3D, or it runs round past the trace's own span and the
     // fillet surface covers that span twice.
-    fi.base.base.extension_stops_on_closure = k.fixes.offset_extension_as_itself;
+    fi.base.base.extension_stops_on_closure = true;
     let mut cx = Cx {
         k,
         target,

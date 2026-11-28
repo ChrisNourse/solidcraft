@@ -192,6 +192,14 @@ impl FilletSolver {
         self.trace_across = across;
     }
 
+    /// How far (3D) the trace's base surface domains reach past their own at least along
+    /// the filleted edge (`0` = by the extension factor alone), and which parameter
+    /// directions of each base surface (`[surface][u, v]`) run along the edge.
+    pub fn set_trace_reach_along(&mut self, reach: f64, along: [[bool; 2]; 2]) {
+        self.trace_reach_along = reach;
+        self.trace_along = along;
+    }
+
     /// How far the trace extends a base surface's domain past `domain`, in each parameter
     /// direction: the fork's `GetDomainExtension` (`FilletSolver::reaching_extension`),
     /// and in a direction the surface turns back on itself in, no further than where its
@@ -259,14 +267,15 @@ impl FilletSolver {
             return Ok(size);
         };
         // `!( m_dTraceReach > 0.0 )`: a NaN reach returns too
-        let reaches = self.trace_reach > 0.0;
-        if !reaches {
+        let across_reaches = self.trace_reach > 0.0;
+        let along_reaches = self.trace_reach_along > 0.0;
+        if !across_reaches && !along_reaches {
             return Ok(size);
         }
         let Some(ends) = domain_ends(k, surface, domain)? else {
             return Ok(size);
         };
-        // which of the solver's base surfaces this is: its directions across the edge
+        // which of the solver's base surfaces this is: its directions across / along the edge
         let mut which = None;
         for (index, slot) in self.surfaces.iter().enumerate() {
             if let Some(slot) = slot {
@@ -275,20 +284,33 @@ impl FilletSolver {
                 }
             }
         }
-        let across = which
-            .and_then(|index| self.trace_across.get(index))
-            .copied()
-            .unwrap_or([true, true]);
-        let [across_u, across_v] = across;
         let uv_size = domain.size();
         let [u_min, u_max, v_min, v_max] = ends;
         let d3d_u = u_min.distance(u_max);
         let d3d_v = v_min.distance(v_max);
-        if across_u && d3d_u > EFF_ZERO_SQRT {
-            size.x = smos_max(size.x, self.trace_reach * uv_size.x / d3d_u);
+        if across_reaches {
+            let [across_u, across_v] = which
+                .and_then(|index| self.trace_across.get(index))
+                .copied()
+                .unwrap_or([true, true]);
+            if across_u && d3d_u > EFF_ZERO_SQRT {
+                size.x = smos_max(size.x, self.trace_reach * uv_size.x / d3d_u);
+            }
+            if across_v && d3d_v > EFF_ZERO_SQRT {
+                size.y = smos_max(size.y, self.trace_reach * uv_size.y / d3d_v);
+            }
         }
-        if across_v && d3d_v > EFF_ZERO_SQRT {
-            size.y = smos_max(size.y, self.trace_reach * uv_size.y / d3d_v);
+        if along_reaches {
+            let [along_u, along_v] = which
+                .and_then(|index| self.trace_along.get(index))
+                .copied()
+                .unwrap_or([true, true]);
+            if along_u && d3d_u > EFF_ZERO_SQRT {
+                size.x = smos_max(size.x, self.trace_reach_along * uv_size.x / d3d_u);
+            }
+            if along_v && d3d_v > EFF_ZERO_SQRT {
+                size.y = smos_max(size.y, self.trace_reach_along * uv_size.y / d3d_v);
+            }
         }
         Ok(size)
     }
@@ -297,6 +319,7 @@ impl FilletSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::det;
     use crate::nurbs::b_spline_surface::BSplineSurface;
 
     fn plane(_k: &Kernel) -> Surface {
@@ -347,7 +370,7 @@ mod tests {
         use crate::nurbs::b_spline_curve::KnotType;
         use crate::nurbs::b_spline_surface::{BSplineSurfaceForm, CanonicalSurfaceData};
         let step = (turn / spans as f64).to_radians();
-        let mid_weight = (0.5 * step).cos();
+        let mid_weight = det::cos(0.5 * step);
         let mut points = Vec::new();
         let mut weights = Vec::new();
         for i in 0..=2 * spans {
@@ -358,7 +381,7 @@ mod tests {
                 (radius / mid_weight, mid_weight)
             };
             for z in [0.0, 4.0] {
-                points.push(Point3::new(r * angle.cos(), r * angle.sin(), z));
+                points.push(Point3::new(r * det::cos(angle), r * det::sin(angle), z));
                 weights.push(w);
             }
         }
@@ -396,7 +419,7 @@ mod tests {
         }
         let p = continued.evaluate_point(k, Point2::new(u, 0.5)).unwrap();
         // the low side is on the x axis and the arc runs anticlockwise from it
-        (-p.y).atan2(p.x).to_degrees().rem_euclid(360.0)
+        det::atan2(-p.y, p.x).to_degrees().rem_euclid(360.0)
     }
 
     #[test]
@@ -458,7 +481,7 @@ mod tests {
         let domain = arc.natural_uv_domain_with_nurb(&k).unwrap();
         // the tangent lines of the sides meet 10 tan 30 from each, and a span of 75 degrees
         // over a quarter of the domain leaves its end at 8 sin 37.5 radians per unit of u
-        let meeting = 30.0_f64.to_radians().tan() / (8.0 * 37.5_f64.to_radians().sin());
+        let meeting = det::tan(30.0_f64.to_radians()) / (8.0 * det::sin(37.5_f64.to_radians()));
         let size = s.domain_extension(&k, Some(&arc), &domain).unwrap();
         assert!((size.x - meeting).abs() < 1e-13, "{} {meeting}", size.x);
         // along the axis the cylinder is straight: the factor's

@@ -19,9 +19,15 @@
 //! Not upstream (WR-404, tangency-labs/solidcore#411): the curve sweep's caps
 //! come from the side faces at the sweep's ends (`sweep_end_curves`), not the first
 //! and last `count` side faces.
+//! Not upstream (T-2272): the curve sweep joins each run of a profile's consecutive
+//! collinear lines into one line before joining the profile (`join_collinear_lines`), so
+//! the face swept from the run has one knot span across it, not one per line with the
+//! parameter speed jumping between them.
 //! Not upstream (tangency-labs/solidcore#2192, WR-675): a sweep along a closed path
 //! whose end sections lie on its start sections (`sweep_ends_coincide`) is not capped,
 //! so the stitch joins its side faces' end edges to their start edges.
+//! Not upstream: an exact path sweep whose face boundary is only approximately
+//! singular refuses, and the closed path is built piece by piece at the true offset.
 //! Not upstream (the SolidCraft fork's tangency-labs/smlib 5d3939e, WR-523, #1450):
 //! [`PrimitiveCreation::create_curve_sweep_with_placements`] reports the rigid motions
 //! carrying the profile onto the first, middle and last sections.
@@ -47,6 +53,7 @@ use crate::curve::curve::p2::CurvePropertyType;
 use crate::curve::curve::p7::PropertyAnalysisOptions;
 use crate::curve::curve::Curve;
 use crate::error::primitive::PrimitiveFailure;
+use crate::error::sweep::SweepFailure;
 use crate::error::{ignore_status, Result, SolidError};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::tol::ZONE_TOL_3D;
@@ -63,7 +70,7 @@ use crate::surface::surface::{
 };
 use crate::sweep::skin_ends::{end_tangents_of, skinned_surface_with_end_tangents, SkinEnd};
 use crate::sweep::topology_sweep::access::{FaceRef, RegionRef};
-use crate::topology::{BrepId, EdgeuseId, FaceId};
+use crate::topology::{Brep, BrepId, EdgeuseId, FaceId};
 
 use super::skin_sources::{layer_sources, LoopSpans, NotTraced, Segment, SkinSources, SkinTrace};
 
@@ -962,7 +969,10 @@ impl PrimitiveCreation {
             let mut closed_sections = options.cap_ends
                 && !composites.composites.is_empty()
                 && path_leaves_its_start(&prepared.path, a.brep(brep)?.tolerance())?;
-            for (index, mut composite) in composites.composites.into_iter().enumerate() {
+            let tolerance = a.brep(brep)?.tolerance();
+            let closed_path = path_returns_to_its_start(&prepared.path, tolerance)?;
+            for (index, composite) in composites.composites.into_iter().enumerate() {
+                let mut composite = join_collinear_lines(composite, tolerance)?;
                 let profile = composite.make_composite_nurb()?;
                 let want_placements = index == 0 && opt_placements.is_some();
                 // (not upstream) an upright sweep's up direction, turned into the space the
@@ -992,6 +1002,7 @@ impl PrimitiveCreation {
                     .filter(|(exact, _)| exact.bound() <= ZONE_TOL_3D),
                     _ => None,
                 };
+                let definition_is_exact = exact.is_some();
                 let (net, definition) = if let Some((exact, built)) = exact {
                     (built, Some(exact))
                 } else {
@@ -1003,6 +1014,9 @@ impl PrimitiveCreation {
                     };
                     (net, fitted)
                 };
+                // Only a closed path is refused below: the piece-by-piece sweep that takes over
+                // there is for closed paths. An open or fitted sweep keeps its previous result.
+                let refuse_near_singular = closed_path && definition_is_exact;
                 // Compare complete sections before the surface is split into faces.
                 // A closed sweep's individual path pieces need not close on themselves.
                 if closed_sections {
@@ -1021,6 +1035,18 @@ impl PrimitiveCreation {
                 let domain = surface.natural_uv_domain_if_built();
                 let mut made = Vec::new();
                 ignore_status(a.surface_faces(brep, surface, domain, &mut made))?;
+                // a corner arc whose inner radius is inside the approximation tolerance
+                // leaves a boundary close to a point. Surface test 5 refuses that, and moving
+                // the straight walls onto the bend's centre changes the volume. Refuse here;
+                // the exact piece sweep keeps the true offset.
+                if refuse_near_singular {
+                    let near = a.with_primitive_brep(brep, |k, model| {
+                        boundary_only_approximately_singular(k, model, &made)
+                    })?;
+                    if near {
+                        return Err(SolidError::sweep(OP, SweepFailure::SweptWallNearlySingular));
+                    }
+                }
                 let first = side_faces.len();
                 side_faces.extend(made);
                 groups.push(first..side_faces.len());
@@ -1064,6 +1090,138 @@ impl PrimitiveCreation {
         a.kernel_mut(brep)?.context.set_doing_boolean(previous);
         result
     }
+}
+
+/// The ends of segment `s` as it runs in its composite (its sense applied) when its curve is
+/// a straight line: a non-rational degree-1 B-spline with two control points. `None` for any
+/// other curve.
+fn straight_segment(
+    s: &crate::curve::composite_curve::CompositeCurveSegment,
+) -> Result<Option<(Point3, Point3)>> {
+    let crate::curve::curve::CurveKind::BSpline(b) = s.curve.kind() else {
+        return Ok(None);
+    };
+    if b.degree()? != 1 || b.is_rational()? {
+        return Ok(None);
+    }
+    let [p, q] = b.control_points()? else {
+        return Ok(None);
+    };
+    let (p, q) = (Point3::new(p.x, p.y, p.z), Point3::new(q.x, q.y, q.z));
+    Ok(Some(if s.same_sense { (p, q) } else { (q, p) }))
+}
+
+/// Whether the line from `start` to `end` passes within `tol` of every point of `joints`,
+/// each lying strictly between the two ends along it: the polyline through them is that line
+/// to `tol`, running one way.
+fn joints_on_line(start: Point3, end: Point3, joints: &[Point3], tol: f64) -> bool {
+    let d = end - start;
+    let len2 = d.dot(d);
+    if !(len2.is_finite() && len2 > 0.0) {
+        return false;
+    }
+    joints.iter().all(|&j| {
+        let along = (j - start).dot(d);
+        let off = (j - start) - d * (along / len2);
+        along > 0.0 && along < len2 && off.length() <= tol
+    })
+}
+
+/// (not upstream, T-2272) `composite` with each run of consecutive straight segments that
+/// lie on one line (every joint within `tol` of the line through the run's ends, the run
+/// going one way) replaced by that one line segment. The joined profile
+/// ([`CompositeCurve::make_composite_nurb`]) gives every segment one knot span whatever its
+/// length, and the sweep makes a face only where the profile turns a corner, so a run of
+/// collinear lines would be one face whose parameter speed jumps at every hidden knot: smooth
+/// in space, creased in its own UV, and a trim crossing a crease is fitted with a near-kink.
+/// One line has one span and no crease. The shape is the same to `tol` (the joints are the
+/// polyline's only departure from the line). A run is not joined across a closed composite's
+/// seam. The composite is returned as it was when nothing joins.
+///
+/// # Errors
+///
+/// Those of the segments' B-spline queries, the line construction and
+/// [`CompositeCurve::with_curves`].
+fn join_collinear_lines(composite: CompositeCurve, tol: f64) -> Result<CompositeCurve> {
+    let segments = composite.segments();
+    let mut straight = Vec::new();
+    for s in segments {
+        straight.push(straight_segment(s)?);
+    }
+    // runs[i]: the segments from i up to (not including) the run's end
+    let mut curves = Vec::new();
+    let mut senses = Vec::new();
+    let mut gaps = Vec::new();
+    let mut joined_any = false;
+    let mut i = 0;
+    while let Some(first) = segments.get(i) {
+        let mut end = i + 1;
+        if let Some(Some((start, mut last))) = straight.get(i).copied() {
+            let mut joints = Vec::new();
+            while let Some(Some((next_start, next_end))) = straight.get(end).copied() {
+                let mut trial = joints.clone();
+                trial.push(last);
+                if next_start.distance(last) > tol || !joints_on_line(start, next_end, &trial, tol)
+                {
+                    break;
+                }
+                joints = trial;
+                last = next_end;
+                end += 1;
+            }
+            if end > i + 1 {
+                joined_any = true;
+                let line = BSplineCurve::create_line_segment(composite.dim(), start, last)?;
+                curves.push(Curve::from(line));
+                senses.push(true);
+                gaps.push(segments.get(end - 1).map_or(0.0, |s| s.gap_end));
+                i = end;
+                continue;
+            }
+        }
+        curves.push(first.curve.clone());
+        senses.push(first.same_sense);
+        gaps.push(first.gap_end);
+        i = end;
+    }
+    if !joined_any {
+        return Ok(composite);
+    }
+    CompositeCurve::with_curves(
+        composite.dim(),
+        curves,
+        composite.is_closed(),
+        Some(&senses),
+        Some(&gaps),
+    )
+}
+
+/// Whether the path's end point lies within `tol` of its start point.
+fn path_returns_to_its_start(path: &BSplineCurve, tol: f64) -> Result<bool> {
+    let (lo, hi) = path.nurb_ref()?.param_bounds();
+    let start = path.evaluate_point(lo)?;
+    let end = path.evaluate_point(hi)?;
+    let distance = start.distance(end);
+    Ok(distance.is_finite() && distance <= tol)
+}
+
+/// Whether a face of an exact path sweep fails surface test 5: a natural boundary is
+/// approximately singular and not exactly singular (`assert_test_surface5`).
+fn boundary_only_approximately_singular(
+    k: &crate::kernel::Kernel,
+    b: &Brep,
+    faces: &[FaceId],
+) -> Result<bool> {
+    for &face in faces {
+        let Some(surface) = crate::topology::face::p2::surface(b, face)? else {
+            continue;
+        };
+        let sing = surface.get_singularities(k, false, false)?;
+        if sing.approx_singular.wrapping_sub(sing.singular) != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The rigid motions carrying the profile as given onto the sweep's sections placed
@@ -1506,6 +1664,47 @@ mod tests {
             trim: None,
         })
         .unwrap()
+    }
+
+    /// The near-singular refusal is for a closed path only: a path returns to its start
+    /// when its end point lies within the tolerance of its start point, and an open path
+    /// (a line, an arc, a loop with a gap) does not.
+    #[test]
+    fn a_path_returns_to_its_start_only_when_it_closes() {
+        let tol = 1e-6;
+        let square = |gap: f64| {
+            let points = [
+                Vec3::ZERO,
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(10.0, 10.0, 0.0),
+                Vec3::new(0.0, 10.0, 0.0),
+                Vec3::new(0.0, gap, 0.0),
+            ];
+            canonical(
+                1,
+                &points,
+                &[2, 1, 1, 1, 2],
+                &[0.0, 0.25, 0.5, 0.75, 1.0],
+                None,
+            )
+        };
+        assert!(path_returns_to_its_start(&square(0.0), tol).unwrap());
+        assert!(path_returns_to_its_start(&square(1e-7), tol).unwrap());
+        assert!(!path_returns_to_its_start(&square(1e-3), tol).unwrap());
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let points = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let arc = canonical(
+            2,
+            &points,
+            &[3, 3],
+            &[0.0, 1.0],
+            Some(&[1.0, half, 1.0][..]),
+        );
+        assert!(!path_returns_to_its_start(&arc, tol).unwrap());
     }
 
     /// A review case on #17100: a closed path whose parameter dwells near its start. The

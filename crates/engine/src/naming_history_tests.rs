@@ -951,10 +951,175 @@ fn a_design_saved_before_pieces_were_numbered_by_place_opens_marked_and_names_al
     let kept = listed(&mut reopened, "Disc");
     assert_eq!(kept.len(), by_place.len());
     let mut legacy = solidcraft_doc::Document::clone(&s.doc);
-    legacy.features.iter_mut().for_each(|f| f.kernel_piece_order = true);
+    legacy.features.iter_mut().for_each(|f| (f.kernel_piece_order, f.least_face_piece_order) = (true, true));
     let mut saved_with = Session::new(legacy);
     saved_with.refresh();
     assert_eq!(listed(&mut saved_with, "Disc"), kept);
+}
+
+/// The lid of `script` (#22230): its centre of mass's z, and the z of the centres of its four
+/// round cylinders (the rounds along the outline's lines) as `model.faces` gives them, the command
+/// the issue measured with, after checking it is one shell of 8 sides, 2 caps and 8 rounds (18
+/// faces, 40 edges, 24 vertices) of the reporter's volume.
+fn lid_rounds(script: &Value, edits: &[(&str, &str)]) -> (f64, Vec<f64>) {
+    let mut s = Session::default();
+    s.run_script(script).unwrap();
+    for (name, expression) in edits {
+        change(&mut s, name, expression);
+    }
+    assert_eq!(error(&s, "LidTopRound"), None);
+    let m = solidcraft_kernel::measure(&s.model.state().body("Lid").expect("Lid").body).unwrap();
+    assert_eq!((m.faces, m.edges, m.vertices, m.shells), (18, 40, 24, 1));
+    assert!((m.volume - 23497.934).abs() < 1e-2, "volume {}", m.volume);
+    let faces = run(&mut s, "model.faces", json!({"body": "Lid"}))["faces"].as_array().cloned().unwrap_or_default();
+    let round = |f: &&Value| f["name"].as_str().is_some_and(|n| n.starts_with("F45:"));
+    assert_eq!(faces.iter().filter(round).count(), 8, "{faces:?}");
+    let cylinders: Vec<f64> = faces.iter().filter(round).filter(|f| !f["cylinder"].is_null()).filter_map(|f| f["centroid"][2].as_f64()).collect();
+    assert_eq!(cylinders.len(), 4, "{faces:?}");
+    (m.centroid.z, cylinders)
+}
+
+/// The fillet of the #22230 script, its stored edge name and pick replaced.
+fn lid_round_at(script: &Value, edge_name: &str, pick: [f64; 3]) -> Value {
+    let mut script = script.clone();
+    let fillet = script["commands"].as_array_mut().unwrap().iter_mut().find(|c| c["params"]["feature"]["id"] == 45).expect("the fillet");
+    fillet["params"]["feature"]["edge_names"] = json!([edge_name]);
+    fillet["params"]["feature"]["edges"] = json!([pick]);
+    script
+}
+
+/// #22230: an extrude with a start offset names both its caps `top`, told apart only by where
+/// they lie (`#1`, `#2`), and builds since #21762 number them the other way round from 0.47.0. A
+/// round 0.47.0 saved on the lid's top edge, `F44:side:l1|F44:top#1` with its pick on that edge,
+/// rounded the bottom edge: the number found the other cap, and the pick was not looked at. On the
+/// body the pick was made on, the pick decides between edges told apart only by that number.
+/// Expected values are 0.47.0's, from the issue: the rounds' cylinders centred at z 22.21, the
+/// lid's centre of mass at z 20.347; at the bottom edge they are at z 40.8 - 22.21 = 18.59.
+#[test]
+fn a_round_saved_on_a_start_offset_caps_edge_stays_on_the_edge_it_was_picked_on() {
+    let script: Value = serde_json::from_str(include_str!("../../../examples/regressions/fillet_saved_on_start_offset_lid_top_edge.json")).unwrap();
+    let at_z = |zs: &[f64], z: f64| zs.iter().all(|c| (c - z).abs() < 5e-3);
+    let (com, cylinders) = lid_rounds(&script, &[]);
+    assert!((com - 20.347).abs() < 1e-3, "centre of mass z {com}");
+    assert!(at_z(&cylinders, 22.21), "{cylinders:?}");
+
+    // A pick on an edge named otherwise (the upright where line l1 meets arc a1) does not decide:
+    // the name finds its edge, `top#1` the bottom cap now, as without the pick.
+    let upright = lid_round_at(&script, "F44:side:l1|F44:top#1", [12.35, -37.1, 20.4]);
+    let (_, cylinders) = lid_rounds(&upright, &[]);
+    assert!(at_z(&cylinders, 18.59), "{cylinders:?}");
+
+    // A round named on the top edge as builds name it now (`top#2`), then the lid raised 6 mm: the
+    // pick, not updated, lies on the bottom edge of the raised lid, an edge named alike but for its
+    // number. The body moved since the pick, so the name decides and the round stays on the top
+    // edge, 6 mm up.
+    let named_now = lid_round_at(&script, "F44:side:l1|F44:top#2", [0.0, -37.1, 23.4]);
+    let (com, cylinders) = lid_rounds(&named_now, &[("parting_z", "wall + pcb_below + pcb_above + 9 mm")]);
+    assert!((com - 26.347).abs() < 1e-3, "centre of mass z {com}");
+    assert!(at_z(&cylinders, 28.21), "{cylinders:?}");
+
+    // The same round, the lid turned half a turn about the y axis through its box's centre by a
+    // Move before it: the box is the one the pick was made on, but the pick, not updated, lies on
+    // the other cap's edge, named alike but for its number. The body moved, so the name decides:
+    // the round follows `top#2` down to the bottom edge (centre of mass at z 40.8 - 20.347).
+    let mut turned = named_now.clone();
+    let turn = json!({"command": "timeline.add", "params": {"feature": {
+        "bodies": ["Lid"], "id": 50, "name": "TurnLid", "translate": ["0", "0", "0"], "rotate_axis": [0.0, 1.0, 0.0],
+        "origin": ["0", "0", "20.4 mm"], "angle": "180 deg", "suppressed": false, "type": "move"}}});
+    let commands = turned["commands"].as_array_mut().unwrap();
+    let at = commands.iter().position(|c| c["params"]["feature"]["id"] == 45).expect("the fillet");
+    commands.insert(at, turn);
+    let (com, cylinders) = lid_rounds(&turned, &[]);
+    assert!((com - 20.453).abs() < 1e-3, "centre of mass z {com}");
+    assert!(at_z(&cylinders, 18.59), "{cylinders:?}");
+}
+
+/// A rod (radius 3 about y 15, z 10, from x 10 to 30) through a plate joined over it, from z 8 to
+/// 12: the plate's extrude has a start offset, so both its caps are `top`, and they border faces of
+/// the same features, so they are told apart only by where they lie (`#1` at z 8, `#2` at z 12),
+/// as are the rod's side above the plate and below it. Each cap meets the rod's side along two
+/// lines (`~1`, `~2`, at y 15 -/+ sqrt(5)); the upper cap meets only the side above the plate. A
+/// round on the upper cap's line at y 15 + sqrt(5) (its middle at x 20), as built now ("Round").
+/// Returns the session, the plate's and the round's feature ids.
+fn rod_through_offset_plate() -> (Session, u64, u64) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "YZ", "name": "RodSketch"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [15, 10], "radius": 3}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "RodSketch", "distance": 20, "start_offset": 10, "name": "Rod", "body_name": "Part"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "PlateSketch"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(
+        &mut s,
+        "solid.extrude",
+        json!({"sketch": "PlateSketch", "distance": 4, "start_offset": 8, "operation": "join", "targets": ["Part"], "name": "Plate"}),
+    );
+    run(&mut s, "solid.fillet", json!({"edges": [rod_line(1.0)], "radius": 1, "name": "Round"}));
+    let (plate, round) = (id(&s, "Plate"), id(&s, "Round"));
+    (s, plate, round)
+}
+
+/// The middle of the line where the rod of [`rod_through_offset_plate`] leaves the plate's upper
+/// cap, on the side of `side` (+1: y 15 + sqrt(5), -1: y 15 - sqrt(5)).
+fn rod_line(side: f64) -> [f64; 3] {
+    [20.0, 15.0 + side * 5f64.sqrt(), 12.0]
+}
+
+/// The design of [`rod_through_offset_plate`] saved with its round's edge stored as `edge_name`
+/// and picked at `pick`, opened again.
+fn rod_round_reopened(s: &Session, edge_name: &str, pick: [f64; 3]) -> Session {
+    let mut doc: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    let round = doc["features"].as_array_mut().unwrap().iter_mut().find(|f| f["name"] == "Round").expect("the round");
+    round["edge_names"] = json!([edge_name]);
+    round["edges"] = json!([pick]);
+    Session::new(solidcraft_doc::Document::from_json(&doc.to_string()).unwrap())
+}
+
+/// #22418: a design saved by a build that numbered an extrude's two like-named caps the other way
+/// round (the flange of #18324, saved by 0.43.0, whose two `bottom` caps trade numbers since
+/// #21762) stores a round on the upper cap's edge with the lower cap's number. The lower cap does
+/// not meet the face on the edge's other side, so that name finds no edge at all, where #22230's
+/// name found the other cap's edge. On the body it was picked on, the pick, on the one edge named
+/// alike but for its faces' numbers, decides; a pick on an edge named otherwise (the other line,
+/// `~1` for `~2`) still asks for the edge again.
+#[test]
+fn a_round_saved_with_the_other_caps_number_finds_its_edge_at_its_pick() {
+    let (mut s, plate, round) = rod_through_offset_plate();
+    assert_eq!(error(&s, "Round"), None);
+    let stored = s.doc.find_feature("Round").unwrap().edge_names.first().cloned().unwrap_or_default();
+    let (upper, lower) = (format!("F{plate}:top#2"), format!("F{plate}:top#1"));
+    assert!((stored.starts_with(&format!("{upper}|")) || stored.contains(&format!("|{upper}~"))) && stored.ends_with("~2"), "{stored}");
+    // Rounded on the upper cap's line, not the lower's: a point 0.05 from the line along the
+    // bisector of the corner, which the round (radius 1) fills out to 1 / sin(half) - 1, about
+    // 0.095. The rod's wall leaves the cap leaning back over the rod at acos(2 / 3) to the cap's
+    // plane (its normal there is (sqrt(5), 2) / 3 in y, z), so the corner outside it opens
+    // 180 deg - acos(2 / 3). The lower cap's line is the mirror image in z 10.
+    let half = (std::f64::consts::PI - (2.0f64 / 3.0).acos()) / 2.0;
+    let [x, y, z] = rod_line(1.0);
+    let (up, down) = ([x, y + 0.05 * half.cos(), z + 0.05 * half.sin()], [x, y + 0.05 * half.cos(), 20.0 - z - 0.05 * half.sin()]);
+    let rounded = |s: &Session| solid_at(s, up) && !solid_at(s, down);
+    assert!(rounded(&s), "{:?}", names(&s, "Part"));
+    assert!(names(&s, "Part").iter().any(|(n, _)| *n == format!("F{round}:blend({stored})")), "{:?}", names(&s, "Part"));
+    // Before the round (the edge it rounds still there), no edge has the name with the lower
+    // cap's number.
+    let saved = stored.replacen(&format!("{upper}|"), &format!("{lower}|"), 1).replacen(&format!("|{upper}~"), &format!("|{lower}~"), 1);
+    assert_ne!(saved, stored);
+    run(&mut s, "timeline.roll_to", json!({"feature": "Plate"}));
+    let edges = run(&mut s, "model.edges", json!({"body": "Part"}));
+    run(&mut s, "timeline.roll_to", json!({}));
+    let edge_names: Vec<&str> = edges["edges"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
+    assert!(edge_names.contains(&stored.as_str()) && !edge_names.contains(&saved.as_str()), "{saved} in {edge_names:?}");
+
+    // Saved with the lower cap's number, picked on the edge: the round is on that edge again.
+    let reopened = rod_round_reopened(&s, &saved, rod_line(1.0));
+    assert_eq!(error(&reopened, "Round"), None);
+    assert!(rounded(&reopened), "{:?}", names(&reopened, "Part"));
+    assert!(has_volume(&reopened, "Part", volume_of(&s, "Part")), "{} {}", volume_of(&reopened, "Part"), volume_of(&s, "Part"));
+
+    // The same name picked on the other line (`~1`): named otherwise, so the pick does not decide.
+    let elsewhere = rod_round_reopened(&s, &saved, rod_line(-1.0));
+    assert_eq!(reselect(&elsewhere, "Round").as_deref(), Some(saved.as_str()));
 }
 
 /// The volumes of the design's bodies, by name.
@@ -1556,4 +1721,420 @@ fn saved_projections_of_a_revolve_cuts_flanks_open_with_0_45_numbered_names() {
         let cold = Session::new(solidcraft_doc::Document::from_json(&doc.to_json()).unwrap());
         assert!(error(&cold, "Projection").is_some(), "{name} at {at:?}");
     }
+}
+
+/// A 40 x 30 x 20 block ("Block") with a blind hole ("Hole", 16 deep from the bottom) whose wall
+/// breaks out through the block's y = 30 side, and a slot ("Slot", z 8 to 12) across the hole that
+/// cuts its wall in pieces. A sketch ("Projection") projects the four lines where the hole's
+/// wall meets that side, each between the side and a piece of the wall.
+fn hole_wall_in_pieces_projected() -> (Session, u64, [Vec3; 4]) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 20, "name": "Block"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [20, 29], "radius": 3}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 16, "operation": "cut", "name": "Hole"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [10, -5], "p1": [30, 35]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 4, "start_offset": 8, "operation": "cut", "name": "Slot"}));
+    // The hole's wall meets the y = 30 side where x = 20 ± √(3² - 1²).
+    let dx = 8f64.sqrt();
+    let at = [Vec3::new(20.0 - dx, 30.0, 4.0), Vec3::new(20.0 + dx, 30.0, 4.0), Vec3::new(20.0 - dx, 30.0, 14.0), Vec3::new(20.0 + dx, 30.0, 14.0)];
+    let profile = run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Projection"}))["sketch"].as_u64().unwrap();
+    let refs: Vec<Value> = at.iter().map(|p| json!({"edge": [p.x, p.y, p.z]})).collect();
+    run(&mut s, "sketch.project", json!({"refs": refs}));
+    run(&mut s, "sketch.finish", json!({}));
+    (s, profile, at)
+}
+
+#[test]
+fn saved_projections_of_numbered_edges_open_after_the_face_they_bound_is_split_into_named_pieces() {
+    let (s, profile, at) = hole_wall_in_pieces_projected();
+    let state = s.model.state();
+    let expected = &state.sketch(profile).unwrap().sketch;
+    assert_eq!(expected.links.len(), 4);
+    assert!(expected.links.iter().all(|link| !link.lost));
+    // Today the hole's wall is in pieces, each named after the faces around it, and each line
+    // lies between the side and a piece.
+    let names: Vec<String> = expected.links.iter().map(|link| link.edge_name.clone().unwrap_or_default()).collect();
+    assert!(names.iter().all(|n| n.contains(":side:c1#[")), "{names:?}");
+    // 0.46.2 saved such a wall as one face, and the lines between it and the side as numbered
+    // edges between those two faces (#22928): synthetic saved links of that form, in two orders.
+    let whole = |n: &str, k: usize| format!("{}~{k}", n.split_once("#[").unwrap().0);
+    let old: Vec<String> = names.iter().enumerate().map(|(i, n)| whole(n, i + 1)).collect();
+    let reversed: Vec<String> = names.iter().enumerate().map(|(i, n)| whole(n, names.len() - i)).collect();
+    assert!(old.iter().all(|n| !n.contains('#')), "{old:?}");
+    for saved in [names.clone(), old.clone(), reversed] {
+        let mut doc = solidcraft_doc::Document::clone(&s.doc);
+        let solidcraft_doc::FeatureKind::Sketch { sketch, .. } = &mut doc.feature_mut(profile).unwrap().kind else { panic!("sketch") };
+        for (link, name) in sketch.links.iter_mut().zip(&saved) {
+            link.edge_name = Some(name.clone());
+        }
+        let mut cold = Session::new(solidcraft_doc::Document::from_json(&doc.to_json()).unwrap());
+        cold.model.no_cache = true;
+        cold.refresh();
+        assert_eq!(error(&cold, "Projection"), None, "{saved:?}");
+        let reopened = cold.model.state();
+        let actual = &reopened.sketch(profile).unwrap().sketch;
+        assert!(actual.links.iter().all(|link| !link.lost), "{saved:?}");
+        assert_eq!(actual.curves, expected.curves, "{saved:?}");
+        assert_eq!(actual.points, expected.points, "{saved:?}");
+    }
+    // A point off every such edge (on the side, 3 mm from the wall) still finds nothing.
+    let mut doc = solidcraft_doc::Document::clone(&s.doc);
+    let solidcraft_doc::FeatureKind::Sketch { sketch, .. } = &mut doc.feature_mut(profile).unwrap().kind else { panic!("sketch") };
+    sketch.links[0].edge_name = Some(old[0].clone());
+    sketch.links[0].source = solidcraft_sketch::LinkSource::Edge { body: "Body1".into(), at: at[0] - Vec3::new(3.0, 0.0, 0.0) };
+    let cold = Session::new(solidcraft_doc::Document::from_json(&doc.to_json()).unwrap());
+    assert!(error(&cold, "Projection").is_some(), "{} off the edge", old[0]);
+}
+
+/// The volume of body `name` (0 when there is none).
+fn volume_of(s: &Session, name: &str) -> f64 {
+    s.model.state().body(name).map_or(0.0, |b| solidcraft_kernel::measure(&b.body).unwrap().volume)
+}
+
+/// A 100 x 20 x 20 bar ("Bar") notched at the top of its +x end ("Notch") and sawn in two at
+/// x 88 to 90 ("Saw"); the long piece renamed "Main" and slotted ("Slot", which names it).
+fn sawn_bar(s: &mut Session) {
+    run(s, "solid.box", json!({"length": 100, "width": 20, "height": 20, "corner": [0, 0, 0], "operation": "new", "body_name": "Bar"}));
+    run(s, "solid.box", json!({"length": 5, "width": 40, "height": 10, "corner": [95, -10, 10], "operation": "cut", "name": "Notch"}));
+    run(s, "solid.box", json!({"length": 2, "width": 40, "height": 40, "corner": [88, -10, -10], "operation": "cut", "name": "Saw"}));
+    // The end piece (x 90 to 100) keeps the bar's name, the long piece (x 0 to 88) is the saw's.
+    assert_eq!(body_at(s, [95.0, 10.0, 5.0]).as_deref(), Some("Bar"));
+    assert_eq!(body_at(s, [50.0, 10.0, 5.0]).as_deref(), Some("Bar (1)"));
+    run(s, "body.rename", json!({"body": "Bar (1)", "name": "Main"}));
+    let stored = s.doc.features.iter().find(|f| f.name == "Saw").map(|f| f.body_names.clone()).unwrap_or_default();
+    assert_eq!(stored, ["Main"], "the saw stores its piece's name");
+    run(
+        s,
+        "solid.box",
+        json!({"length": 10, "width": 40, "height": 5, "corner": [40, -10, 15], "operation": "cut", "targets": ["Main"], "name": "Slot"}),
+    );
+}
+
+/// Whether body `name` has volume `want` (mm³).
+fn has_volume(s: &Session, name: &str, want: f64) -> bool {
+    (volume_of(s, name) - want).abs() < 1e-6 * want
+}
+
+/// #21552: the pieces a cut saws a body into take their names first by the faces the cut made
+/// on them, so a renamed piece keeps its name when an upstream edit takes away the face that
+/// held a piece's least face name. Edited to take the whole end of the bar, the notch took the
+/// end piece's `+x` face: the long piece's least name then sorted first, it took the bar's name
+/// and the end piece took `Main`, so the slot cut into `Main` silently missed it.
+#[test]
+fn a_renamed_piece_of_a_sawn_bar_keeps_its_name_when_an_upstream_notch_takes_the_end() {
+    let mut s = Session::default();
+    sawn_bar(&mut s);
+    assert!(has_volume(&s, "Main", 88.0 * 400.0 - 1000.0), "{}", volume_of(&s, "Main"));
+    assert!(has_volume(&s, "Bar", 4000.0 - 1000.0), "{}", volume_of(&s, "Bar"));
+    // The notch now takes the whole end: the end piece is x 90 to 95.
+    run(&mut s, "timeline.edit", json!({"feature": "Notch", "set": {"height": "20", "corner": [95, -10, 0]}}));
+    for feature in ["Notch", "Saw", "Slot"] {
+        assert_eq!(error(&s, feature), None, "{feature}");
+    }
+    assert_eq!(body_at(&s, [50.0, 10.0, 5.0]).as_deref(), Some("Main"));
+    assert_eq!(body_at(&s, [92.0, 10.0, 5.0]).as_deref(), Some("Bar"));
+    assert!(!solid_at(&s, [45.0, 10.0, 17.5]), "the slot still cuts the long piece");
+    assert!(has_volume(&s, "Main", 88.0 * 400.0 - 1000.0), "{}", volume_of(&s, "Main"));
+    assert!(has_volume(&s, "Bar", 2000.0), "{}", volume_of(&s, "Bar"));
+    // Evaluated again from its features alone, as on opening it, the design names them so too.
+    let mut again = solidcraft_doc::Model::new();
+    again.no_cache = true;
+    again.evaluate(&s.doc);
+    let state = again.state();
+    let starts_at = |name: &str, x: f64| state.body(name).is_some_and(|b| (b.mesh().bounds().min.x - x).abs() < 1e-9);
+    assert!(starts_at("Main", 0.0) && starts_at("Bar", 90.0), "{:?}", state.bodies.iter().map(|b| &b.name).collect::<Vec<_>>());
+    // And back: the notch at the top of the end again leaves every name where it was.
+    run(&mut s, "timeline.edit", json!({"feature": "Notch", "set": {"height": "10", "corner": [95, -10, 10]}}));
+    assert_eq!(body_at(&s, [50.0, 10.0, 5.0]).as_deref(), Some("Main"));
+    assert_eq!(body_at(&s, [95.0, 10.0, 5.0]).as_deref(), Some("Bar"));
+    assert!(has_volume(&s, "Main", 88.0 * 400.0 - 1000.0), "{}", volume_of(&s, "Main"));
+}
+
+/// A design saved before #21552 keeps naming the pieces its features split bodies into by their
+/// least face name alone, which the body names it stores mean: it opens with every piece under
+/// the name it was saved with, and its features say so.
+#[test]
+fn a_design_saved_before_pieces_followed_their_cut_faces_opens_with_its_names() {
+    let mut s = Session::default();
+    sawn_bar(&mut s);
+    let mut file: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    assert!(file["features"].as_array().unwrap().iter().all(|f| f.get("least_face_piece_order").is_none()));
+    file["format"] = json!("solidcraft/67");
+    file.as_object_mut().unwrap().remove("format_pending");
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&file.to_string()).unwrap());
+    assert!(reopened.doc.features.iter().all(|f| f.least_face_piece_order));
+    assert_eq!(body_at(&reopened, [50.0, 10.0, 5.0]).as_deref(), Some("Main"));
+    assert_eq!(body_at(&reopened, [95.0, 10.0, 5.0]).as_deref(), Some("Bar"));
+    assert!(has_volume(&reopened, "Main", 88.0 * 400.0 - 1000.0), "{}", volume_of(&reopened, "Main"));
+    assert_eq!(error(&reopened, "Slot"), None);
+}
+
+/// #21552: a feature mirror that saws a body into pieces also orders its pieces by the faces
+/// the mirrored cut made (`F<src>:<role>@F<mirror>.1`), so a renamed piece keeps its name when
+/// an upstream edit removes the face holding a piece's least face name.
+#[test]
+fn a_renamed_piece_of_a_mirrored_cut_keeps_its_name_when_an_upstream_notch_takes_the_end() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 20, "height": 20, "corner": [-100, -10, -10], "operation": "new", "body_name": "Beam"}));
+    run(&mut s, "solid.box", json!({"length": 5, "width": 40, "height": 10, "corner": [95, -20, 0], "operation": "cut", "name": "Notch"}));
+    run(&mut s, "solid.box", json!({"length": 2, "width": 40, "height": 40, "corner": [-90, -20, -20], "operation": "cut", "name": "Saw"}));
+    run(&mut s, "solid.mirror", json!({"features": ["Saw"], "plane": "YZ", "name": "MirrorSaw"}));
+    assert_eq!(body_at(&s, [0.0, 0.0, 0.0]).as_deref(), Some("Beam"));
+    assert_eq!(body_at(&s, [-95.0, 0.0, 0.0]).as_deref(), Some("Beam (1)"));
+    assert_eq!(body_at(&s, [92.0, 0.0, 5.0]).as_deref(), Some("Beam (2)"));
+    run(&mut s, "body.rename", json!({"body": "Beam (2)", "name": "RightEnd"}));
+    let stored = s.doc.features.iter().find(|f| f.name == "MirrorSaw").map(|f| f.body_names.clone()).unwrap_or_default();
+    assert_eq!(stored, ["RightEnd"], "the mirror stores its piece's name");
+    run(
+        &mut s,
+        "solid.box",
+        json!({"length": 2, "width": 40, "height": 5, "corner": [91, -20, -10], "operation": "cut", "targets": ["RightEnd"], "name": "Slot"}),
+    );
+    assert!(has_volume(&s, "Beam", 176.0 * 400.0), "{}", volume_of(&s, "Beam"));
+    assert!(has_volume(&s, "RightEnd", 3000.0 - 200.0), "{}", volume_of(&s, "RightEnd"));
+    // The notch now takes the whole +x end, removing the beam's original `+x` face.
+    run(&mut s, "timeline.edit", json!({"feature": "Notch", "set": {"height": "20", "corner": [95, -20, -10]}}));
+    for feature in ["Notch", "Saw", "MirrorSaw", "Slot"] {
+        assert_eq!(error(&s, feature), None, "{feature}");
+    }
+    assert_eq!(body_at(&s, [0.0, 0.0, 0.0]).as_deref(), Some("Beam"));
+    assert_eq!(body_at(&s, [-95.0, 0.0, 0.0]).as_deref(), Some("Beam (1)"));
+    assert_eq!(body_at(&s, [92.0, 0.0, 5.0]).as_deref(), Some("RightEnd"));
+    assert!(!solid_at(&s, [92.0, 0.0, -7.5]), "the slot still cuts the right end piece");
+    assert!(has_volume(&s, "Beam", 176.0 * 400.0), "{}", volume_of(&s, "Beam"));
+    assert!(has_volume(&s, "RightEnd", 2000.0 - 200.0), "{}", volume_of(&s, "RightEnd"));
+}
+
+/// #4341: suppressing or deleting the feature that created a blend's target body must never jump
+/// a Fillet or Chamfer onto another body in the design. Suppressing the upstream maker leaves the
+/// blend failing with a clear suppressed-maker diagnostic (nothing re-pointed, distinct from
+/// `Reselect`/`unknown body`) and recovers cleanly on unsuppress; deleting the upstream maker
+/// invalidates cached state and fails with an actionable missing-reference error.
+#[test]
+fn suppressing_or_deleting_target_body_never_jumps_blend_to_another_body() {
+    let fillet_removed = (4.0 - std::f64::consts::PI) * 30.0;
+    let chamfer_removed = 2.0 * 30.0;
+    for (command, size, removed) in [("solid.fillet", "radius", fillet_removed), ("solid.chamfer", "distance", chamfer_removed)] {
+        for clear_body in [false, true] {
+            let mut s = Session::default();
+            run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S1"}));
+            run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+            run(&mut s, "sketch.finish", json!({}));
+            run(&mut s, "solid.extrude", json!({"sketch": "S1", "distance": 10, "name": "Extrude1", "body_name": "Body1"}));
+            run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S2"}));
+            run(&mut s, "sketch.rectangle.two_point", json!({"p0": [100, 0], "p1": [140, 30]}));
+            run(&mut s, "sketch.finish", json!({}));
+            run(&mut s, "solid.extrude", json!({"sketch": "S2", "distance": 10, "operation": "new", "name": "Extrude2", "body_name": "Body2"}));
+            run(&mut s, command, json!({"edges": [[40, 15, 10]], size: 2, "name": "Blend"}));
+            if clear_body {
+                let bid = id(&s, "Blend");
+                match &mut s.doc_mut().feature_mut(bid).unwrap().kind {
+                    solidcraft_doc::FeatureKind::Fillet { body, .. } | solidcraft_doc::FeatureKind::Chamfer { body, .. } => *body = None,
+                    other => panic!("unexpected feature kind: {other:?}"),
+                }
+                s.refresh();
+            }
+            assert_eq!(error(&s, "Blend"), None, "{command} clear_body={clear_body}");
+            assert_eq!(warning(&s, "Blend"), None, "{command} clear_body={clear_body}");
+            assert!(has_volume(&s, "Body1", 12000.0 - removed), "{command}: {}", volume_of(&s, "Body1"));
+            assert!(has_volume(&s, "Body2", 12000.0), "{command}: {}", volume_of(&s, "Body2"));
+
+            // Suppressing Extrude1 leaves Blend failing with a suppressed-maker error (not Reselect)
+            // and must never touch Body2.
+            run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": true}));
+            let suppressed_err = error(&s, "Blend").unwrap_or_default();
+            assert!(
+                suppressed_err.contains("Extrude1") && suppressed_err.contains("suppressed"),
+                "{command} clear_body={clear_body}: {suppressed_err}"
+            );
+            assert!(reselect(&s, "Blend").is_none(), "{command} clear_body={clear_body}: suppressed maker must not ask to reselect");
+            assert!(has_volume(&s, "Body2", 12000.0), "{command} jumped onto Body2: {}", volume_of(&s, "Body2"));
+            assert!(solid_at(&s, [139.9, 15.0, 9.9]), "{command} blended Body2's edge");
+
+            // Cold rebuild matches incremental state.
+            let mut cold = Session::new(solidcraft_doc::Document::clone(&s.doc));
+            cold.model.no_cache = true;
+            cold.refresh();
+            assert_eq!(error(&cold, "Blend"), error(&s, "Blend"), "cold {command}");
+            assert!(has_volume(&cold, "Body2", 12000.0), "cold {command}");
+
+            // Unsuppressing Extrude1 restores the exact original blend with no error or warning.
+            run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": false}));
+            assert_eq!(error(&s, "Blend"), None, "unsuppressed {command}");
+            assert_eq!(warning(&s, "Blend"), None, "unsuppressed {command}");
+            assert!(has_volume(&s, "Body1", 12000.0 - removed), "unsuppressed {command}: {}", volume_of(&s, "Body1"));
+            assert!(has_volume(&s, "Body2", 12000.0), "unsuppressed {command}: {}", volume_of(&s, "Body2"));
+
+            // Transitioning from suppressed -> deleted invalidates any cached state and errors clearly.
+            run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": true}));
+            assert!(error(&s, "Blend").as_deref().is_some_and(|e| e.contains("suppressed")));
+            run(&mut s, "timeline.delete", json!({"features": ["Extrude1"]}));
+            let err = error(&s, "Blend").expect("deleted upstream maker must error");
+            if clear_body {
+                assert!(reselect(&s, "Blend").is_some(), "{command}: expected reselect, got {err}");
+            } else {
+                assert!(err.contains("unknown body `Body1`"), "{command}: {err}");
+            }
+            assert!(has_volume(&s, "Body2", 12000.0), "{command} deleted maker jumped onto Body2: {}", volume_of(&s, "Body2"));
+        }
+    }
+}
+
+/// An unnamed single-body fillet saved without edge names, edge refs, or an explicit body keeps
+/// following the moved edge via the unique-nearest fallback (with a warning) when the sole box is
+/// resized so the pick lies more than 5% off the edge.
+#[test]
+fn single_body_unnamed_fillet_follows_moved_edge_after_resize_with_warning() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "len", "expression": "40 mm"}));
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": "len", "width": 30, "height": 10, "name": "Box1", "body_name": "Body1"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[40, 15, 10]], "radius": 2, "name": "Round"}));
+    let fid = id(&s, "Round");
+    {
+        let f = s.doc_mut().feature_mut(fid).unwrap();
+        f.edge_names.clear();
+        f.edge_refs.clear();
+        if let solidcraft_doc::FeatureKind::Fillet { body, .. } = &mut f.kind {
+            *body = None;
+        }
+    }
+    s.refresh();
+    let strip = (4.0 - std::f64::consts::PI) * 30.0;
+    assert_eq!(error(&s, "Round"), None);
+    assert_eq!(warning(&s, "Round"), None);
+    assert!(has_volume(&s, "Body1", 12000.0 - strip), "{}", volume_of(&s, "Body1"));
+
+    // Resize so the saved pick at x=40 is 6 mm off the moved edge at x=34 (> 5% of the ~46.4 mm
+    // body diagonal, so outside pick reach) while remaining uniquely nearest within 0.25 * size.
+    change(&mut s, "len", "34 mm");
+    assert_eq!(error(&s, "Round"), None);
+    let warn = warning(&s, "Round").unwrap_or_default();
+    assert!(warn.contains("re-found on the nearest edge"), "{warn}");
+    assert!(has_volume(&s, "Body1", 34.0 * 30.0 * 10.0 - strip), "{}", volume_of(&s, "Body1"));
+    assert!(!solid_at(&s, [33.9, 15.0, 9.9]), "fillet must land on the moved x=34 top edge");
+    assert!(solid_at(&s, [0.1, 15.0, 9.9]), "opposite top edge must stay sharp");
+}
+
+/// #4341: an unnamed legacy Fillet or Chamfer (empty `edge_names`, `body: None`) must neither
+/// remap its bounding box onto an unrelated body when its original body disappears nor jump onto
+/// an unrelated nearby edge on the same body when the picked edge is gone.
+#[test]
+fn unnamed_blend_never_jumps_to_another_body_or_unrelated_edge() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "len", "expression": "40 mm"}));
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": "len", "width": 30, "height": 10, "name": "Extrude1", "body_name": "Body1"}));
+    run(
+        &mut s,
+        "solid.box",
+        json!({"corner": [100, 0, 0], "length": 40, "width": 30, "height": 10, "operation": "new", "name": "Extrude2", "body_name": "Body2"}),
+    );
+    run(&mut s, "solid.chamfer", json!({"edges": [[40, 15, 10]], "distance": 2, "name": "Bevel"}));
+    let bid = id(&s, "Bevel");
+    {
+        let f = s.doc_mut().feature_mut(bid).unwrap();
+        f.edge_names.clear();
+        if let solidcraft_doc::FeatureKind::Chamfer { body, .. } = &mut f.kind {
+            *body = None;
+        }
+    }
+    s.refresh();
+    assert_eq!(error(&s, "Bevel"), None);
+    assert!(has_volume(&s, "Body1", 12000.0 - 60.0));
+    assert!(has_volume(&s, "Body2", 12000.0));
+
+    // Suppressing Extrude1 leaves only Body2: EdgeRef must NOT remap onto Body2.
+    run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": true}));
+    assert!(error(&s, "Bevel").is_some(), "unnamed chamfer with Body1 gone must fail cleanly");
+    assert!(has_volume(&s, "Body2", 12000.0), "unnamed chamfer jumped to Body2: {}", volume_of(&s, "Body2"));
+
+    // Restore Extrude1, drop edge_refs, and shrink Body1 so the picked point is 6 mm off the
+    // nearest edge (within the old 0.25 * size jump radius): must refuse instead of chamfering x=34.
+    run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": false}));
+    s.doc_mut().feature_mut(bid).unwrap().edge_refs.clear();
+    change(&mut s, "len", "34 mm");
+    assert!(error(&s, "Bevel").is_some(), "disappeared edge must fail cleanly instead of jumping");
+    assert!(has_volume(&s, "Body1", 34.0 * 30.0 * 10.0), "chamfer jumped to another edge on Body1: {}", volume_of(&s, "Body1"));
+    assert!(has_volume(&s, "Body2", 12000.0));
+}
+
+/// #4341: suppressing an upstream joined feature on the same body leaves a Fillet/Chamfer on its
+/// edges failing with a suppressed-feature diagnostic (leaving the base body untouched and
+/// distinct from `Reselect`), recovers cleanly on unsuppress, and transitions to `Reselect` when
+/// the maker feature is deleted instead.
+#[test]
+fn suppressed_vs_deleted_joined_maker_on_same_body_is_distinct_and_recovers() {
+    let fillet_removed = (1.0 - std::f64::consts::FRAC_PI_4) * 10.0;
+    let chamfer_removed = 0.5 * 10.0;
+    for (command, size, removed) in [("solid.fillet", "radius", fillet_removed), ("solid.chamfer", "distance", chamfer_removed)] {
+        let mut s = Session::default();
+        block(&mut s);
+        run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 10, "name": "BossSketch"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [15, 10], "p1": [25, 20]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "BossSketch", "distance": 5, "operation": "join", "name": "Boss"}));
+        run(&mut s, command, json!({"edges": [[25, 15, 15]], size: 1, "name": "Blend", "tangent_chain": false}));
+        assert_eq!(error(&s, "Blend"), None, "{command}");
+        assert!(has_volume(&s, "Body1", 12500.0 - removed), "{command}: {}", volume_of(&s, "Body1"));
+
+        // Suppress Boss: Body1 stays at 12000 mm³, Blend fails naming suppressed Boss (not Reselect).
+        run(&mut s, "timeline.suppress", json!({"feature": "Boss", "suppressed": true}));
+        let suppressed_err = error(&s, "Blend").unwrap_or_default();
+        assert!(suppressed_err.contains("Boss") && suppressed_err.contains("suppressed"), "{command}: {suppressed_err}");
+        assert!(reselect(&s, "Blend").is_none(), "suppressed {command} must not ask to reselect");
+        assert!(has_volume(&s, "Body1", 12000.0), "suppressed {command} touched Body1: {}", volume_of(&s, "Body1"));
+
+        // Unsuppress Boss: Blend resolves the original edge again.
+        run(&mut s, "timeline.suppress", json!({"feature": "Boss", "suppressed": false}));
+        assert_eq!(error(&s, "Blend"), None, "unsuppressed {command}");
+        assert_eq!(warning(&s, "Blend"), None, "unsuppressed {command}");
+        assert!(has_volume(&s, "Body1", 12500.0 - removed), "unsuppressed {command}: {}", volume_of(&s, "Body1"));
+
+        // Suppress then delete Boss: must switch cleanly from suppressed error to Reselect error.
+        run(&mut s, "timeline.suppress", json!({"feature": "Boss", "suppressed": true}));
+        assert!(error(&s, "Blend").as_deref().is_some_and(|e| e.contains("suppressed")));
+        run(&mut s, "timeline.delete", json!({"features": ["Boss"]}));
+        assert!(reselect(&s, "Blend").is_some(), "deleted {command}: {:?}", error(&s, "Blend"));
+        assert!(has_volume(&s, "Body1", 12000.0), "deleted {command} touched Body1: {}", volume_of(&s, "Body1"));
+    }
+}
+
+/// #4341: a single Fillet spanning two bodies skips the edge whose maker is suppressed (with a
+/// warning) while keeping only the surviving body's own edge rounded, never jumping the skipped
+/// edge onto the surviving body.
+#[test]
+fn multi_body_blend_skips_suppressed_body_without_jumping_to_surviving_body() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S1"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "S1", "distance": 10, "name": "Extrude1", "body_name": "Body1"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S2"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [100, 0], "p1": [140, 30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "S2", "distance": 10, "operation": "new", "name": "Extrude2", "body_name": "Body2"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[40, 15, 10], [140, 15, 10]], "radius": 2, "name": "Both"}));
+    let strip = (4.0 - std::f64::consts::PI) * 30.0;
+    assert_eq!(error(&s, "Both"), None);
+    assert!(has_volume(&s, "Body1", 12000.0 - strip));
+    assert!(has_volume(&s, "Body2", 12000.0 - strip));
+
+    run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": true}));
+    assert_eq!(error(&s, "Both"), None);
+    let warn = warning(&s, "Both").unwrap_or_default();
+    assert!(warn.contains("Extrude1") && warn.contains("suppressed"), "{warn}");
+    assert!(has_volume(&s, "Body2", 12000.0 - strip), "Body2 must keep only its own rounded edge: {}", volume_of(&s, "Body2"));
+    assert!(solid_at(&s, [100.1, 15.0, 9.9]), "Body2's opposite top edge must stay sharp");
+
+    run(&mut s, "timeline.suppress", json!({"feature": "Extrude1", "suppressed": false}));
+    assert_eq!(error(&s, "Both"), None);
+    assert_eq!(warning(&s, "Both"), None);
+    assert!(has_volume(&s, "Body1", 12000.0 - strip));
+    assert!(has_volume(&s, "Body2", 12000.0 - strip));
 }

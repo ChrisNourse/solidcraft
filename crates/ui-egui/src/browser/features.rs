@@ -38,6 +38,8 @@ pub(crate) fn reveal(app: &mut SolveApp, id: u64, body: &str) {
     app.ui.show_browser = true;
     reveal_shared_panel(app, "browser");
     app.tree.reveal = None;
+    app.tree.reveal_occurrence = None;
+    app.tree.reveal_construction = None;
     super::open_path(app, &path);
     let scope = if path.is_empty() { format!("c{component}") } else { occurrence_key(&path) };
     app.tree.open_row(&scope);
@@ -69,6 +71,8 @@ pub(crate) fn reveal_in_history(app: &mut SolveApp, id: u64) {
     let scope = if path.is_empty() { format!("c{component}") } else { occurrence_key(&path) };
     set_open(app, &scope, path.is_empty() || start_open, true);
     set_open(app, &format!("{scope}/history"), true, true);
+    app.tree.reveal_occurrence = None;
+    app.tree.reveal_construction = None;
     for folder in folder_chain(&app.session.doc.timeline_groups, id) {
         crate::timeline_folders::set_open(app, folder, true);
     }
@@ -108,7 +112,10 @@ pub(super) fn rows(app: &mut SolveApp, rows: &mut Rows<'_>, component: u64, path
     // The history opens by default; the Features folder stays closed until opened.
     let (key, label) =
         if compact { (format!("{scope}/history"), solidcraft_ui_text::tr("ui.history_title")) } else { (format!("{scope}/features"), "Features") };
-    let open = is_open(app, &key, compact);
+    // "History without a folder": the features are listed straight under the component, where the
+    // folder's row would be, with no folder row to fold them.
+    let flat = compact && app.preferences.browser_history_without_folder;
+    let open = flat || is_open(app, &key, compact);
     // Folded, it carries the worst mark of what it holds. A row scrolled out of view paints
     // nothing, so its mark is not worked out: in a long tree of placements of a part with a long
     // history, every folder's mark scanned the design's whole history on every frame (#6083).
@@ -149,7 +156,8 @@ pub(super) fn rows(app: &mut SolveApp, rows: &mut Rows<'_>, component: u64, path
             _ => {}
         }
     }
-    let mark = if acts.lit.any()
+    let mark = if !flat
+        && acts.lit.any()
         && app
             .session
             .doc
@@ -162,20 +170,24 @@ pub(super) fn rows(app: &mut SolveApp, rows: &mut Rows<'_>, component: u64, path
     } else {
         Mark::None
     };
-    let r = node_row(
-        rows,
-        Spec { key: &key, ..Default::default() },
-        Row { depth, fold: Some(open), icon: "folder", label, status, status_tip: tip.as_ref(), mark, ..Default::default() },
-    );
-    if r.fold || r.clicked {
-        toggle(app, &key, compact);
-    }
-    if compact && let Some(at) = r.secondary {
-        acts.menu = Some((at, Target::HistoryFolder));
+    if !flat {
+        let r = node_row(
+            rows,
+            Spec { key: &key, ..Default::default() },
+            Row { depth, fold: Some(open), icon: "folder", label, status, status_tip: tip.as_ref(), mark, ..Default::default() },
+        );
+        if r.fold || r.clicked {
+            toggle(app, &key, compact);
+        }
+        if compact && let Some(at) = r.secondary {
+            acts.menu = Some((at, Target::HistoryFolder));
+        }
     }
     if !open {
         return;
     }
+    // The rows below are drawn one level in from `depth`; without the folder they take its level.
+    let depth = if flat { depth.saturating_sub(1) } else { depth };
     let indices = match current_model(app) {
         Some(model) if compact => model.history_features(&app.session, component).to_vec(),
         Some(model) => model.features.get(&component).cloned().unwrap_or_default(),
@@ -523,16 +535,20 @@ fn folder_row(app: &mut SolveApp, rows: &mut Rows<'_>, folders: &[TimelineGroup]
         pick_folder(app, rows.ui(), folder.id);
     }
     inline_rename(app, rows.ui(), r.name_at(), &folder.name);
-    if let Some(resp) = &r.resp {
-        crate::ui_kit::Menu::context(resp, |ui| {
-            if crate::ui_kit::menu::button(ui, "Rename Folder", "rename").clicked() {
+    if let Some(resp) = &r.resp
+        && (crate::ui_kit::Menu::context_active(resp))
+    {
+        let mut menu = vec![crate::ui_kit::Item::action("rename_folder", "Rename Folder", "rename")];
+        menu.extend(crate::timeline::edit_holes_item(app, folder.id));
+        menu.push(crate::ui_kit::Item::sep());
+        menu.extend(crate::timeline_left::selection_items(app, folders, false));
+        if let Some(picked) = crate::ui_kit::Menu::context_items(resp, &menu) {
+            if picked.id == "rename_folder" {
                 start_inline_rename(app, what.clone(), r.name_at());
-                ui.close();
+            } else if !crate::timeline::run_holes_item(app, &picked) {
+                crate::timeline_left::run_selection_item(app, &picked);
             }
-            crate::timeline::edit_holes_item(app, ui, folder.id);
-            ui.separator();
-            crate::timeline_left::selection_actions(app, ui, folders, false);
-        });
+        }
     }
 }
 
@@ -748,7 +764,7 @@ fn marker_row(app: &SolveApp, ui: &mut egui::Ui, depth: usize) -> egui::Response
     crate::ui_kit::history_marker(ui.painter(), line, true, crate::workspace::tab_accent(&t, &app.ui.tab));
     crate::scenario::publish_handle("browser:rollback", rect.center());
     if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
     response.backing_on_hover_text(solidcraft_ui_text::tr("ui.history_marker_tip"))
 }
@@ -2139,6 +2155,45 @@ mod tests {
         assert!(!h.app.preferences.history_in_browser);
     }
 
+    /// The option is a ticked or unticked row in the View section of the Browser panel's ⋯ menu,
+    /// and a click on the row turns the saved setting over.
+    #[test]
+    fn the_history_without_a_folder_option_is_a_row_of_the_browser_menu() {
+        let mut h = Harness::new();
+        assert!(!h.app.preferences.browser_history_without_folder, "off by default");
+        assert!(
+            crate::browser::menu_toggles(&h.app).contains(&("history-without-folder", "prefs.browser_history_without_folder", false)),
+            "a row of the menu, unticked"
+        );
+        crate::browser::menu_action(&mut h.app, "history-without-folder").unwrap();
+        assert!(h.app.preferences.browser_history_without_folder, "a click turns it on");
+        assert!(crate::browser::menu_toggles(&h.app).contains(&("history-without-folder", "prefs.browser_history_without_folder", true)), "ticked");
+        crate::browser::menu_action(&mut h.app, "history-without-folder").unwrap();
+        assert!(!h.app.preferences.browser_history_without_folder, "a second click turns it off");
+    }
+
+    /// "History without a folder": the features are listed straight under the component, one
+    /// level up, with no History folder row; off, they sit in the folder.
+    #[test]
+    fn browser_history_without_folder_lists_features_under_the_component() {
+        let mut h = Harness::new();
+        // The body has its own name, so "Block" is only the feature's row.
+        h.app.run("solid.box", json!({"length":5,"width":5,"height":5,"name":"Block","body_name":"Cube"})).unwrap();
+        h.app.run("view.history_layout", json!({"dock":"browser"})).unwrap();
+        h.frames(3);
+        let history = solidcraft_ui_text::tr("ui.history_title").to_string();
+        let indent = |label: &str| crate::scenario::handle_at(&format!("indent:{label}")).unwrap_or_else(|| panic!("indent:{label}")).x;
+        assert_eq!(count(&history), 1, "off by default: the History folder");
+        let (in_folder, origin) = (indent("Block"), indent("Origin"));
+        assert!(in_folder > origin + 1.0, "in the folder, the feature is one level in");
+
+        h.app.preferences.browser_history_without_folder = true;
+        h.frames(2);
+        assert_eq!(count(&history), 0, "no History folder row");
+        assert_eq!(count("Block"), 1, "the feature is still listed");
+        assert!((indent("Block") - origin).abs() < 0.5, "at the component's folders' level");
+    }
+
     /// The browser lists sketches as the vertical History does (`history_rows`): a shared sketch
     /// under its first feature, an unused one and one the marker separates from its feature as
     /// rows of their own; selecting a feature lights its sketch.
@@ -2281,6 +2336,20 @@ mod tests {
         settle_heavy(&mut h);
         assert_eq!(h.app.session.doc.marker, Some(2), "the marker drag still rolls back");
         assert_eq!(order(&h), [ids[2], ids[0], ids[1]], "rolling back moves no feature");
+    }
+
+    /// The History marker in the browser moves only up and down, so the pointer over it shows
+    /// up-and-down arrows, not the grab cursor Windows draws as a four-way move cross.
+    #[test]
+    fn browser_history_marker_shows_up_and_down_arrows() {
+        let mut h = Harness::new();
+        h.app.run("solid.box", json!({"length":5,"width":5,"height":5,"name":"Block","body_name":"Cube"})).unwrap();
+        h.app.run("view.history_layout", json!({"dock":"browser"})).unwrap();
+        h.frames(3);
+        let marker = crate::scenario::handle_at("browser:rollback").unwrap();
+        h.call("ui.move", json!({"x": marker.x, "y": marker.y}));
+        h.frames(2);
+        assert_eq!(h.output.cursor_icon, egui::CursorIcon::ResizeVertical, "up and down arrows over the marker");
     }
 
     /// #7221: the history in the browser shows the timeline folders as the vertical History

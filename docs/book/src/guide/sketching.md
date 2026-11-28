@@ -173,6 +173,12 @@ user parameter `width` and dimensions with it, as when [placing a dimension](par
 box that does not become a dimension (a polygon's sides, a rounded rectangle's corner radius)
 takes a value only.
 
+To move or resize [imported SVG or DXF curves](files.md), edit their sketch and box-select
+the curves. Choose **Sketch tab → Modify → Move/Copy Sketch Entities** (`sketch.move`) to
+move or copy them, or **Sketch Scale** (`sketch.scale`) in the same panel to resize them.
+The Model tab's Move/Copy moves bodies. In scripts, `sketch.insert_svg` and
+`sketch.insert_dxf` also accept `at: [x, y]` and `scale` to position and size curves during import.
+
 The Sketch Palette's **Construction Geometries** option hides construction curves while you
 work. A hidden construction curve cannot be picked by a click or by a box. Nothing invisible
 is selectable. The option belongs to one sketch and is saved with the design. Centerlines are
@@ -235,7 +241,8 @@ becomes a dimension of that side, and the other sides stay equal to it.
 `sketch.edit_text` take a `font`, the family or full name of an installed font ("DejaVu Sans") or the path
 of a `.ttf` / `.otf` file, and the **Edit Text** dialog has a **Font** field for it. An unknown font is an
 error, and the font is kept with the text in the design, so the text stays editable in it. `SOLIDCRAFT_FONT_DIRS`
-adds folders to the ones searched for installed fonts. On Windows, SolidCraft also reads installed
+adds folders to the ones searched for installed fonts. On Linux, SolidCraft also finds fonts
+registered with Fontconfig when its `fc-list` tool is available. On Windows, SolidCraft reads installed
 font files from the current user's and machine's `Software\Microsoft\Windows NT\CurrentVersion\Fonts`
 registry keys, including absolute file paths outside the standard Windows and per-user Fonts
 folders. Restart SolidCraft after installing fonts to refresh the cached list. A text's `height`, its
@@ -538,6 +545,12 @@ pick reuses or creates a sketch point with an ordinary Midpoint constraint, then
 constraint in one undo step. Both constraints can be selected and deleted independently; deleting
 either keeps the point. After a fillet or chamfer, its Midpoint constraint refers to the original
 full side, retained as construction geometry, just like a manually constrained midpoint.
+
+**Horizontal** and **Vertical**, in the Constrain drop-down, take the same picks but always go the
+way they say, whichever way the line or the points run now; a line running the other way is turned
+keeping its length. While either is on, a thin dashed guide runs along its direction through the
+cursor. Scripts call them as `sketch.constraint.horizontal` and `sketch.constraint.vertical`, with
+`line` or `points` and no `mode`.
 
 Scripts use the same command, with a midpoint reference in the `points` array:
 

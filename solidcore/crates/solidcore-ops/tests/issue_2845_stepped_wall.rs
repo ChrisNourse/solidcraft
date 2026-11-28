@@ -10,6 +10,7 @@
     clippy::indexing_slicing,
     clippy::disallowed_methods
 )] // test: the closed form uses pi
+use solidcore::math::det;
 
 #[path = "../../solidcore/tests/support/solidcraft_fixes.rs"]
 mod solidcraft_fixes;
@@ -106,7 +107,7 @@ fn recorded_stepped_wall() -> Body {
 /// the square [16, 20] x [20 - r, 20] less the disc's part in it,
 /// A(r) = 4 r - int_{r - 4}^{r} sqrt(r^2 - t^2) dt, over the wall's 42.
 fn trimmed_at_its_crease(r: f64) -> f64 {
-    let under = |u: f64| u / 2.0 * (r * r - u * u).max(0.0).sqrt() + r * r / 2.0 * (u / r).asin();
+    let under = |u: f64| u / 2.0 * (r * r - u * u).max(0.0).sqrt() + r * r / 2.0 * det::asin(u / r);
     9520.0 - 42.0 * (4.0 * r - (under(r) - under(r - 4.0)))
 }
 
@@ -129,5 +130,30 @@ fn the_recorded_wall_s_round_past_the_wall_overflows() {
             (v - trimmed_at_its_crease(r)).abs() <= 1e-9 * v,
             "r {r}: {v}"
         );
+    }
+}
+
+/// Both rounds past the ledge's 3 mm on the record body (solidcraft#12342, case 2): the wall's
+/// round is trimmed at its crease ([`trimmed_at_its_crease`]) and the ledge's takes its whole
+/// corner over its 10 mm, the part of it under the wall taken off by the wall's round above.
+/// The two take material in z apart, so their volumes add. It failed with status 1001: the
+/// wall's foot edge on the ledge's top (x = 20, z = -40) was imprinted, then split by the
+/// ledge round's end arc, and only one piece kept the imprinted edge. On the record body it
+/// was the piece past the arc, so the piece from the wall's rail to the arc, which fences the
+/// ledge's top from what the wall's round takes off, was not imprinted: the trim took every
+/// face. The same L made from boxes kept the other piece and built.
+#[test]
+fn the_recorded_wall_and_ledge_past_the_ledge_build() {
+    for r in [4.5, 5.0, 6.0] {
+        let b = recorded_stepped_wall();
+        let edges = [edge_at(&b, WALL), edge_at(&b, LEDGE)];
+        blend(&b, Blend::Round, &edges, &[r], &[], Corners::Filled)
+            .unwrap_or_else(|e| panic!("r {r}: {e}"));
+        let report = b.check(CheckLevel::All).unwrap();
+        assert!(report.is_valid(), "r {r}: {report}");
+        let v = volume(&b);
+        let ledge = (1.0 - std::f64::consts::FRAC_PI_4) * r * r * 10.0;
+        let want = trimmed_at_its_crease(r) - ledge;
+        assert!((v - want).abs() <= 1e-9 * v, "r {r}: {v} against {want}");
     }
 }

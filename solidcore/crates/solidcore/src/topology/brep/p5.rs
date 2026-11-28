@@ -1874,6 +1874,11 @@ fn glue_with_notification_identity(
     for vu in vertex::vertexuses(b, deleted)? {
         remove_vertexuse(b, deleted, vu)?;
         post_insert_vertexuse(b, survivor, vu)?;
+        // The vertex use now sits on `survivor`'s point rather than `deleted`'s, so its
+        // cached vertex/edge and vertex/face gaps are stale (#21432).
+        let use_ = b.vertexuse_mut(vu)?;
+        use_.vertex_edge_gap.reset();
+        use_.vertex_face_gap.reset();
     }
     remove_owned_vertex(b, deleted);
     destroy_topology_record(b, crate::error::EntityRef::Vertex(deleted))?;
@@ -2710,6 +2715,28 @@ pub fn remove_topological_edges_and_vertices(
     keep_vertices: Option<&[VertexId]>,
 ) -> Result<()> {
     remove_topological_with_notifications(k, b, keep_edges, keep_vertices, None)
+}
+
+/// Not upstream (#23441): [`remove_topological_edges_and_vertices`] where two faces on one cone,
+/// torus or surface of revolution with a planar generator cover each other past their own sweeps
+/// (`Caches::cover_across_sweeps`), so the split between two pieces of one such surface, each a
+/// part of its turn (a cone in two halves along a generator), comes out. For a caller that knows
+/// the edges it lets go are such splits: the blend corner's Roll-over at a cusp. Every other
+/// removal keeps upstream's cover, within the covering surface's own sweep.
+///
+/// # Errors
+///
+/// Those of [`remove_topological_edges_and_vertices`].
+pub fn remove_splits_of_one_sweep(
+    k: &mut Kernel,
+    b: &mut Brep,
+    keep_edges: Option<&[EdgeId]>,
+    keep_vertices: Option<&[VertexId]>,
+) -> Result<()> {
+    let was = k.caches.cover_across_sweeps.replace(true);
+    let r = remove_topological_edges_and_vertices(k, b, keep_edges, keep_vertices);
+    k.caches.cover_across_sweeps.set(was);
+    r
 }
 
 /// Removes topological entities using the actual edit-notification environment.

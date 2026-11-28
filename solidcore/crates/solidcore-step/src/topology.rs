@@ -57,6 +57,7 @@ use crate::geom::{BSplineCurve, BSplineSurface, Curve, P3, Placement, Transform,
 use crate::p21::{Entity, Exchange, Param};
 use crate::read::{R, Reader};
 use crate::units;
+use solidcore::math::det;
 
 pub(crate) mod swept;
 
@@ -374,10 +375,16 @@ const FEATURE_MARGIN: f64 = 0.25;
 /// (Fusion: 0.01 mm) beside geometry far finer (edges of 0.2 to 10 um in the same file). Taken
 /// as the solid's tolerance, such edges read as zero-length edges, coincident edges and loops
 /// that turn the wrong way, and the kernel refuses every operation on the solid.
+///
+/// An edge needs twice the stated tolerance, not once: each of its two vertices carries it,
+/// and on a shorter edge their tolerance balls overlap. A union that merges one of them with a
+/// vertex of the other operand then reaches the other one and refuses (#3212: a 0.01 mm round,
+/// edges of 0.0141 mm, in a file stating 0.01 mm).
 fn feature_tolerance(brep: &Brep, stated: f64) -> Option<f64> {
     let shortest = shortest_edge(brep);
-    // An edge as long as the stated tolerance or longer is one that tolerance tells apart.
-    if shortest >= stated {
+    // An edge of twice the stated tolerance or longer keeps its vertices' balls apart; the
+    // slack keeps an edge of exactly twice it there when its length rounds just below.
+    if shortest >= 2.0 * stated * (1.0 - 1e-9) {
         return None;
     }
     let fine = (FEATURE_MARGIN * shortest).max(MIN_TOLERANCE);
@@ -423,13 +430,13 @@ fn read_with<'a>(
 ) -> R<Solid> {
     let stated = tolerance(&context);
     let before = *budget;
-    let first = read_at(ex, reader, item, stated, budget, trims, left_out, sheets)?;
+    let first = read_at(ex, reader, item, stated, stated, budget, trims, left_out, sheets)?;
     let Some(fine) = feature_tolerance(&first.brep, stated) else { return Ok(first) };
     // Read again at the tolerance its own features set; the faces count against the budget once.
     let after = *budget;
     *budget = before;
     let shortest = shortest_edge(&first.brep);
-    match read_at(ex, reader, item, fine, budget, trims, left_out, sheets) {
+    match read_at(ex, reader, item, fine, stated, budget, trims, left_out, sheets) {
         // Its edges' own gaps undo the finer read: as the file states it, with a note why.
         Ok(solid) if !fine_read_holds(&solid.brep, shortest) => {
             *budget = after;
@@ -465,6 +472,7 @@ fn read_at<'a>(
     reader: &mut Reader<'a>,
     item: u64,
     tol: f64,
+    stated: f64,
     budget: &mut usize,
     trims: Option<&dyn Trims>,
     left_out: &HashSet<u64>,
@@ -473,6 +481,7 @@ fn read_at<'a>(
     let e = entity(ex, item)?;
     let name = e.params().first().and_then(Param::as_str).unwrap_or("").to_string();
     let mut b = Builder::new(ex, reader, tol, budget, trims);
+    b.asm.stated = stated.max(tol);
     // The file's faces, edges, vertices and their geometry read into the builder.
     let (ids, kind) = item_shells(ex, item)?;
     let mut shells = Vec::with_capacity(ids.len());
@@ -735,7 +744,15 @@ impl<'b, 'a> Builder<'b, 'a> {
             self.asm.raise_vertex(v, gap, id)?;
         }
         let i = index(self.asm.edges.len())?;
-        self.asm.edges.push(EdgeB { curve, interval, vertices, tolerance: self.asm.tol, pcurve_tolerance: self.asm.pcurve_tolerance(), form: None });
+        self.asm.edges.push(EdgeB {
+            curve,
+            interval,
+            vertices,
+            tolerance: self.asm.tol,
+            pcurve_tolerance: self.asm.pcurve_tolerance(),
+            form: None,
+            origin: Some(id),
+        });
         self.edge_ids.insert(id, (i, mapped.with_step));
         Ok((i, mapped.with_step))
     }
@@ -939,6 +956,7 @@ impl<'b, 'a> Builder<'b, 'a> {
     /// roots of their vertices' joined sets ([`Builder::join_vertices`]).
     fn finish(mut self, item: u64, name: String, shells: Vec<Vec<(u32, bool)>>, kind: Kind) -> R<Solid> {
         self.join_vertices()?;
+        self.asm.source_bytes = self.ex.source_bytes as u64;
         self.asm.finish(item, name, shells, kind)
     }
 
@@ -1048,6 +1066,7 @@ impl<'b, 'a> Builder<'b, 'a> {
                 tolerance: self.asm.tol,
                 pcurve_tolerance: self.asm.pcurve_tolerance(),
                 form: None,
+                origin: None,
             });
             self.poly_edges.insert(key, e);
             uses.push((e, forward));
@@ -1114,15 +1133,17 @@ impl<'b, 'a> Builder<'b, 'a> {
             let s = self.reader.surface(rid(p.get(2), "face geometry")?).map_err(|m| format!("face #{id}: {m}"))?;
             (s, flag(p.get(3), "face same_sense")?)
         };
-        if !loops.iter().any(|l| matches!(l, Bound::Edges(_))) {
-            loops = self.whole_sphere(&step_surface, &loops).map_err(|m| format!("face #{id}: {m}"))?;
+        let has_edge_loop = loops.iter().any(|l| matches!(l, Bound::Edges(_)));
+        if !has_edge_loop {
+            loops = self.whole_surface(&step_surface, &loops).map_err(|m| format!("face #{id}: {m}"))?;
         }
         let extent = self.asm.extent(&loops)?;
         let (surface, reversed) = swept::map_surface(&step_surface, &extent, self.asm.tol).map_err(|m| format!("face #{id}: {m}"))?;
         // Loops relative to the record's natural normal: the face's normal is STEP's surface
         // normal when same_sense, and the record's is STEP's unless `reversed`.
         let sense = same_sense != reversed;
-        if !sense {
+        // Manufactured seams already follow the natural normal, including on a cavity face.
+        if has_edge_loop && !sense {
             for l in &mut loops {
                 if let Bound::Edges(uses) = l {
                     reverse(uses);
@@ -1133,11 +1154,16 @@ impl<'b, 'a> Builder<'b, 'a> {
         Ok((i, sense))
     }
 
-    /// A sphere face bounded by vertex loops alone, each at one of its poles (ISO 10303-42: a face
-    /// of a closed surface bounded by vertices is all of the surface): the whole sphere, its loop
-    /// a meridian from the south pole to the north and back, which [`Assembly::complete_slits`]
-    /// keeps as its seam. Any other face without an edge loop is refused.
-    fn whole_sphere(&mut self, surface: &crate::geom::Surface, loops: &[Bound]) -> R<Vec<Bound>> {
+    /// An untrimmed ring torus needs both periodic seams. A sphere can also have vertex
+    /// bounds at its poles. Other surfaces need an edge loop to determine their extent.
+    fn whole_surface(&mut self, surface: &crate::geom::Surface, loops: &[Bound]) -> R<Vec<Bound>> {
+        if loops.is_empty()
+            && let crate::geom::Surface::Torus { position, major_radius, minor_radius } = surface
+            && major_radius > minor_radius
+            && *minor_radius > 0.0
+        {
+            return Ok(vec![self.asm.torus_seams(&frame(position), *major_radius, *minor_radius, 0.0, 0.0)?]);
+        }
         let crate::geom::Surface::Sphere { position, radius } = surface else { return Err(unsupported("a face without an edge loop")) };
         // Each pole vertex as its joined set's root ([`Builder::meet`]).
         let loops: Vec<Bound> = loops.iter().map(|l| if let &Bound::Vertex(v) = l { Bound::Vertex(self.find(v)) } else { l.clone() }).collect();
@@ -1516,7 +1542,7 @@ fn unfold_line(line: &mut [[f64; 4]], original: &[[f64; 4]], tol: f64) {
     }
     let point = |h: &[f64; 4]| Vec3::new(h[0] / h[3], h[1] / h[3], h[2] / h[3]);
     let within = |i: usize, p: Vec3| original.get(i).map(point).is_some_and(|o| o.dist(p) <= tol);
-    let cos_back = TURNS_BACK_DEGREES.to_radians().cos();
+    let cos_back = det::cos(TURNS_BACK_DEGREES.to_radians());
     let origin = Vec3::new(0.0, 0.0, 0.0);
     let last = line.len().saturating_sub(1);
     // The last step that had a direction, and the point it ended at.
@@ -1817,7 +1843,7 @@ struct Mapped {
 }
 
 fn angle_of(a: f64, b: f64) -> f64 {
-    let t = b.atan2(a);
+    let t = det::atan2(b, a);
     if t < 0.0 { t + TAU } else { t }
 }
 
@@ -1836,14 +1862,14 @@ fn ellipse_angle(x: f64, y: f64, [r0, r1]: [f64; 2]) -> f64 {
         return scaled;
     }
     // Half the squared distance from the point at `t`, and its first and second derivatives.
-    let dist = |t: f64| 0.5 * ((r0 * t.cos() - x).powi(2) + (r1 * t.sin() - y).powi(2));
-    let slope = |t: f64| (r1 * r1 - r0 * r0) * t.sin() * t.cos() + r0 * x * t.sin() - r1 * y * t.cos();
-    let bend = |t: f64| (r1 * r1 - r0 * r0) * (2.0 * t).cos() + r0 * x * t.cos() + r1 * y * t.sin();
+    let dist = |t: f64| 0.5 * (det::powi(r0 * det::cos(t) - x, 2) + det::powi(r1 * det::sin(t) - y, 2));
+    let slope = |t: f64| (r1 * r1 - r0 * r0) * det::sin(t) * det::cos(t) + r0 * x * det::sin(t) - r1 * y * det::cos(t);
+    let bend = |t: f64| (r1 * r1 - r0 * r0) * det::cos(2.0 * t) + r0 * x * det::cos(t) + r1 * y * det::sin(t);
     // A point on the ellipse to rounding: its angle on the circle is the nearest point's.
     if (2.0 * dist(scaled)).sqrt() <= 1e-12 * r0.max(r1) {
         return scaled;
     }
-    let (c, s) = ((x / r0).clamp(-1.0, 1.0).acos(), (y / r1).clamp(-1.0, 1.0).asin());
+    let (c, s) = (det::acos((x / r0).clamp(-1.0, 1.0)), det::asin((y / r1).clamp(-1.0, 1.0)));
     let starts = [scaled, if y < 0.0 { -c } else { c }, s, std::f64::consts::PI - s];
     let Some(mut t) = starts.into_iter().min_by(|a, b| dist(*a).total_cmp(&dist(*b))) else { return scaled };
     let mut d = dist(t);
@@ -1868,7 +1894,7 @@ fn ellipse_angle(x: f64, y: f64, [r0, r1]: [f64; 2]) -> f64 {
             break;
         }
     }
-    angle_of(t.cos(), t.sin())
+    angle_of(det::cos(t), det::sin(t))
 }
 
 /// `x` reduced to [0, 2π).

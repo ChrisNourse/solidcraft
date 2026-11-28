@@ -322,3 +322,199 @@ fn a_bad_cylinder_reference_is_refused() {
     }
     assert!(panicked.is_empty(), "solid.cylinder panicked:\n{}", panicked.join("\n"));
 }
+
+#[test]
+fn a_referenced_hole_patterned_on_a_shelled_body_stays_in_its_wall() {
+    // #23221: a hole placed by edge distances on one wall of a hollow/shelled body is already
+    // drilled when a pattern or mirror replays it, so its centre sits in the bore opening.
+    // Pattern copies must stay in the front wall (y in 0..4), not jump across the cavity into
+    // the back wall (y in 56..60).
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": 200, "width": 60, "height": 55}));
+    run(&mut s, "solid.shell", json!({"faces": [[100, 33, 55]], "thickness": 4}));
+    run(
+        &mut s,
+        "solid.hole",
+        json!({
+            "position": [140, 0, 22],
+            "diameter": 4,
+            "depth": 9,
+            "name": "H",
+            "references": [
+                {"edge": [170, 0, 55], "distance": 33},
+                {"edge": [200, 0, 33], "distance": 60}
+            ]
+        }),
+    );
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["H"], "dir1": [1, 0, 0], "count1": 4, "spacing1": 18, "name": "P"}));
+    for x in [140.0, 158.0, 176.0, 194.0] {
+        assert!(!solid_at(&s, Vec3::new(x, 2.0, 22.0)), "front wall should have a bore at x={x}");
+        assert!(solid_at(&s, Vec3::new(x, 2.0, 25.0)) && solid_at(&s, Vec3::new(x, 2.0, 19.0)), "front wall should be solid beside bore at x={x}");
+        assert!(solid_at(&s, Vec3::new(x, 58.0, 22.0)), "back wall must stay solid at x={x}");
+    }
+    // Mirroring the front-wall hole across the box's midplane drills the back wall at x = 140.
+    run(&mut s, "solid.mirror", json!({"features": ["H"], "plane": {"origin": [0, 30, 0], "normal": [0, 1, 0]}, "name": "M"}));
+    assert!(!solid_at(&s, Vec3::new(140.0, 58.0, 22.0)), "mirrored hole should land in back wall at x=140");
+    for x in [158.0, 176.0, 194.0] {
+        assert!(solid_at(&s, Vec3::new(x, 58.0, 22.0)), "unmirrored back wall positions must stay solid at x={x}");
+    }
+}
+
+#[test]
+fn a_single_reference_and_shallow_blind_hole_pattern_stay_in_their_wall() {
+    // One reference edge on a shelled body: copies stay in the front wall.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": 200, "width": 60, "height": 55}));
+    run(&mut s, "solid.shell", json!({"faces": [[100, 33, 55]], "thickness": 4}));
+    run(
+        &mut s,
+        "solid.hole",
+        json!({
+            "position": [140, 0, 22],
+            "diameter": 4,
+            "depth": 9,
+            "name": "H1",
+            "references": [{"edge": [170, 0, 55], "distance": 33}]
+        }),
+    );
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["H1"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 18, "name": "P1"}));
+    for x in [140.0, 158.0, 176.0] {
+        assert!(!solid_at(&s, Vec3::new(x, 2.0, 22.0)), "single-ref front wall should have a bore at x={x}");
+        assert!(solid_at(&s, Vec3::new(x, 58.0, 22.0)), "single-ref back wall must stay solid at x={x}");
+    }
+
+    // Shallow blind hole whose bottom lies within `size * 1e-4` of the front face: flat_face
+    // must still resolve to the outer wall bordered by the reference edges, not the bore bottom.
+    let mut b = Session::default();
+    run(&mut b, "solid.box", json!({"corner": [0, 0, 0], "length": 2000, "width": 600, "height": 550}));
+    run(&mut b, "solid.shell", json!({"faces": [[1000, 330, 550]], "thickness": 40}));
+    run(
+        &mut b,
+        "solid.hole",
+        json!({
+            "position": [1400, 0, 220],
+            "diameter": 40,
+            "depth": 0.05,
+            "name": "H2",
+            "references": [
+                {"edge": [1700, 0, 550], "distance": 330},
+                {"edge": [2000, 0, 330], "distance": 600}
+            ]
+        }),
+    );
+    run(&mut b, "solid.pattern.rectangular", json!({"features": ["H2"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 180, "name": "P2"}));
+    for x in [1400.0, 1580.0] {
+        assert!(!solid_at(&b, Vec3::new(x, 0.025, 220.0)), "shallow blind bore should open at y=0 for x={x}");
+        assert!(solid_at(&b, Vec3::new(x, 0.1, 220.0)), "shallow blind bore should stop before y=0.1 for x={x}");
+        assert!(solid_at(&b, Vec3::new(x, 580.0, 220.0)), "back wall must stay solid at x={x}");
+    }
+}
+
+/// A 200 × 140 × 20 plate with a 20 × 140 × 100 wall standing on its x = 0 end, and a Ø20 hole
+/// through the plate at (100, 40): 80 mm from the wall top's inner edge (x = 20, z = 100) and
+/// 30 mm from the plate top's back edge (y = 70). The two edges border no face in common.
+fn plate_with_wall_and_hole() -> Session {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 140, "height": 20, "corner": [0, -70, 0]}));
+    run(&mut s, "solid.box", json!({"length": 20, "width": 140, "height": 100, "corner": [0, -70, 0], "operation": "join", "targets": ["Body1"]}));
+    run(
+        &mut s,
+        "solid.hole",
+        json!({
+            "position": [100, 40, 20],
+            "diameter": 20,
+            "depth": 20,
+            "name": "H",
+            "references": [{"edge": [20, 0, 100], "distance": 80}, {"edge": [100, 70, 20], "distance": 30}]
+        }),
+    );
+    s
+}
+
+/// The Ø20 bore through the plate is about (x, y): empty on its axis and up to 8 mm from it,
+/// solid 12 mm from it in every direction.
+fn wide_bore_at(s: &Session, x: f64, y: f64) {
+    let at = Vec3::new(x, y, 10.0);
+    for k in 0..8 {
+        let a = PI / 4.0 * f64::from(k);
+        let p = |r: f64| at + Vec3::new(a.cos(), a.sin(), 0.0) * r;
+        assert!(!solid_at(s, p(0.0)) && !solid_at(s, p(8.0)), "the bore about ({x}, {y}) is empty {a} rad from +x");
+        assert!(solid_at(s, p(12.0)), "the wall about ({x}, {y}) is solid {a} rad from +x");
+    }
+}
+
+fn total_volume(s: &mut Session) -> f64 {
+    run(s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap()
+}
+
+#[test]
+fn a_hole_whose_reference_edges_share_no_face_can_be_mirrored_and_patterned() {
+    // #23504: one edge is on the wall's top, the other on the plate's top. When the hole is made
+    // its centre lies on the plate's top; when a mirror or pattern replays it, the centre is in
+    // the opening, and the copy must still be placed in the plate's top.
+    let plate_and_wall = 200.0 * 140.0 * 20.0 + 20.0 * 140.0 * 80.0;
+    let bore = PI * 10.0 * 10.0 * 20.0;
+    let mut s = plate_with_wall_and_hole();
+    wide_bore_at(&s, 100.0, 40.0);
+    run(&mut s, "solid.mirror", json!({"plane": "XZ", "features": ["H"], "name": "M"}));
+    wide_bore_at(&s, 100.0, 40.0);
+    wide_bore_at(&s, 100.0, -40.0);
+    let v = total_volume(&mut s);
+    assert!((v - (plate_and_wall - 2.0 * bore)).abs() < 1.0, "two Ø20 × 20 bores are cut, volume {v}");
+
+    let mut s = plate_with_wall_and_hole();
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["H"], "dir1": [0, -1, 0], "count1": "3", "spacing1": "45", "name": "P"}));
+    for y in [40.0, -5.0, -50.0] {
+        wide_bore_at(&s, 100.0, y);
+    }
+    let v = total_volume(&mut s);
+    assert!((v - (plate_and_wall - 3.0 * bore)).abs() < 1.0, "three Ø20 × 20 bores are cut, volume {v}");
+    // The copies follow the hole's distances.
+    let h = s.doc.find_feature("H").unwrap();
+    let first = h.kind.inputs().iter().position(|(label, _, _)| *label == "Reference distance").unwrap();
+    let d = h.param_names[first].clone();
+    run(&mut s, "parameters.change", json!({"name": d, "expression": "120 mm"}));
+    let p = s.doc.find_feature("P").unwrap().id;
+    assert!(s.model.result(p).is_some_and(|r| r.error.is_none()), "{:?}", s.model.result(p).map(|r| &r.error));
+    for y in [40.0, -5.0, -50.0] {
+        wide_bore_at(&s, 140.0, y);
+    }
+}
+
+#[test]
+fn a_copied_hole_on_a_chamfer_hinge_keeps_the_face_it_was_drilled_into() {
+    // #23504 review: a 40 mm plate whose x = 200 top edge has a 30 mm chamfer, so the top face
+    // and the chamfer meet along x = 170. A Ø20 hole is placed with its centre on that line, 150
+    // mm from the wall top's edge and 30 mm from the top's back edge, drilled down with a Ø40 × 90°
+    // countersink. Replayed, its centre is in the opening and both the top and the chamfer lie in
+    // planes through it; the top's rim is 20 mm away but the chamfer, below it where the
+    // countersink narrows, only about 14.1 mm. The copy must still be measured in the top's plane:
+    // in the chamfer's plane the distance to the wall's edge reads about 12.6 mm longer and the
+    // copy would move.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 140, "height": 40, "corner": [0, -70, 0]}));
+    run(&mut s, "solid.box", json!({"length": 20, "width": 140, "height": 120, "corner": [0, -70, 0], "operation": "join", "targets": ["Body1"]}));
+    run(&mut s, "solid.chamfer", json!({"edges": [[200, 0, 40]], "distance": 30}));
+    run(
+        &mut s,
+        "solid.hole",
+        json!({
+            "position": [150, 40, 40],
+            "diameter": 20,
+            "depth": 40,
+            "type": "countersink",
+            "cs_diameter": 40,
+            "cs_angle": 90,
+            "name": "H",
+            "references": [{"edge": [20, 0, 120], "distance": 150}, {"edge": [100, 70, 40], "distance": 30}]
+        }),
+    );
+    wide_bore_at(&s, 170.0, 40.0);
+    run(&mut s, "solid.mirror", json!({"plane": "XZ", "features": ["H"], "name": "M"}));
+    wide_bore_at(&s, 170.0, -40.0);
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["H"], "dir1": [0, -1, 0], "count1": "3", "spacing1": "45", "name": "P"}));
+    for y in [40.0, -5.0, -50.0] {
+        wide_bore_at(&s, 170.0, y);
+    }
+}

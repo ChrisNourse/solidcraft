@@ -10,6 +10,34 @@ pub use solidcraft_kernel_api::affine::{AffineRefused, AxisRefusal, Matrix, Offs
 use super::{Which, which};
 use crate::backend::Solidcore;
 
+/// Signed volume scale of the linear part.
+pub fn linear_determinant(matrix: &Matrix) -> f64 {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.linear_determinant(matrix),
+    }
+}
+
+/// Unit direction with the input's sense.
+pub fn directed_unit(axis: [f64; 3]) -> Option<[f64; 3]> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.directed_unit(axis),
+    }
+}
+
+/// Point carried by a displacement in the same frame.
+pub fn translated_point(point: [f64; 3], by: [f64; 3]) -> [f64; 3] {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.translated_point(point, by),
+    }
+}
+
+/// Apply the first turn and then the world-space turn.
+pub fn compose_turn(first: [f64; 3], radians: f64, world: [f64; 3], turn: f64) -> Option<([f64; 3], f64)> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.compose_turn(first, radians, world, turn),
+    }
+}
+
 /// The turn by `angle` radians, right-handed about `axis` (any length but none), about the
 /// line through `point` along it.
 pub fn rotation(point: [f64; 3], axis: [f64; 3], angle: f64) -> Result<Matrix, AffineRefused> {
@@ -61,6 +89,15 @@ pub fn projection_motion(seen: &Matrix, now: &Matrix, origin: [f64; 3], x: [f64;
 pub fn orthonormal_axes(x: [f64; 3], y: [f64; 3]) -> Result<[[f64; 3]; 2], AffineRefused> {
     match which(OpKind::Affine) {
         Which::Solidcore => Solidcore.orthonormal_axes(x, y),
+    }
+}
+
+/// The axes `x` and `y` of a frame whose normal runs along `d`: `y` along `v`'s part square to
+/// `d` and `x = y × unit(d)`, both unit. Refused for numbers not finite, no length, or a `v` whose part
+/// square to `d` is within its own rounding.
+pub fn frame_axes(d: [f64; 3], v: [f64; 3]) -> Result<[[f64; 3]; 2], AffineRefused> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.frame_axes(d, v),
     }
 }
 
@@ -156,6 +193,17 @@ pub fn rect_of_aspect(bl: [f64; 2], br: [f64; 2], top_left: Option<[f64; 2]>, as
     }
 }
 
+/// The plane through `origin` with the unit, square axes `x` and `y` brought onto the line
+/// through `at` along the unit direction `dir`: tilted by the least turn that makes it parallel
+/// to the line, then moved along its normal until it holds the line; a plane that already holds
+/// it comes back unchanged. The new origin and axes; `None` for a number not finite or a line
+/// square to the plane.
+pub fn plane_onto_line(origin: [f64; 3], x: [f64; 3], y: [f64; 3], at: [f64; 3], dir: [f64; 3]) -> Option<([f64; 3], [[f64; 3]; 2])> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.plane_onto_line(origin, x, y, at, dir),
+    }
+}
+
 /// How a rectangle `aspect` times as high as wide fits a frame pinned at `bl`, `br` and `tl`:
 /// its width, and whether the frame stretches it. `None` for no area.
 pub fn fit_aspect(bl: [f64; 3], br: [f64; 3], tl: [f64; 3], aspect: f64) -> Option<(f64, bool)> {
@@ -208,6 +256,39 @@ pub fn cubic_contains(source: &Seg2, piece: &Seg2) -> bool {
 pub fn loop_circle(lp: &Loop2) -> Option<(Vec2, f64)> {
     match which(OpKind::Affine) {
         Which::Solidcore => Solidcore.loop_circle(lp),
+    }
+}
+
+/// Whether `lp` holds `p` by the even-odd rule, decided exactly: `None` when `p` is on the
+/// loop or within rounding of it.
+pub fn loop_holds(lp: &Loop2, p: Vec2) -> Option<bool> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.loop_holds(lp, p),
+    }
+}
+
+/// How far `p` is from `seg`, exactly, for a line or a circular arc: the foot clamped to a
+/// line's ends; on an arc the radial distance where `p` is within its angles, else the
+/// distance to the nearer end. `None` for a free-form segment or a point that is no number.
+pub fn segment_distance(seg: &Seg2, p: Vec2) -> Option<f64> {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.segment_distance(seg, p),
+    }
+}
+
+/// Whether the circles `a` and `b` (centre and radius) are one hole: their centres and their
+/// radii each less than `tol` apart.
+pub fn same_circle(a: (Vec2, f64), b: (Vec2, f64), tol: f64) -> bool {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.same_circle(a, b, tol),
+    }
+}
+
+/// Where a note `height` high stands to name the circle `at` (centre and radius), level with
+/// its centre and clear of its rim on the right: its lower left corner.
+pub fn note_beside(at: (Vec2, f64), height: f64) -> Vec2 {
+    match which(OpKind::Affine) {
+        Which::Solidcore => Solidcore.note_beside(at, height),
     }
 }
 

@@ -129,6 +129,13 @@ fn a_tube_to_flange_round_beside_a_crossing_pipe_is_the_same_with_the_tangent_ch
 /// status 1001) ([T-103](https://tickets.solidcraft.io/t/103), #17600).
 #[test]
 fn a_round_on_an_outline_edge_ending_at_a_pocket_floor_builds() {
+    let mut s = outline_with_pocket();
+    rounds_or_says_why(&mut s, "Plate", json!({"edges": [[300, 150, 10]], "radius": 1.5}));
+}
+
+/// The plate of the test above: a shallow (about 176°) outline corner at (300, 150), its vertical
+/// edge split at z = 25 by a pocket's floor, the pocket's wall on x = 300.
+fn outline_with_pocket() -> Session {
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
     run(&mut s, "sketch.line", json!({"points": [[0, 0], [500, 0], [500, 150], [300, 150], [100, 135], [0, 135]], "closed": true}));
@@ -136,7 +143,25 @@ fn a_round_on_an_outline_edge_ending_at_a_pocket_floor_builds() {
     run(&mut s, "solid.extrude", json!({"distance": 40, "body_name": "Plate"}));
     // 15 deep from the top, one wall on x = 300, open through the side at y = 150.
     run(&mut s, "solid.box", json!({"length": 60, "width": 30, "height": 20, "center": [330, 137, 35], "operation": "cut", "targets": ["Plate"]}));
-    rounds_or_says_why(&mut s, "Plate", json!({"edges": [[300, 150, 10]], "radius": 1.5}));
+    s
+}
+
+/// The two halves of that vertical edge, below and above the floor, rounded together (picked, or
+/// the lower one with its tangent chain) meet the floor's two edges side by side at
+/// (300, 150, 25), where they would end in a step: refused at that point, saying so, with the
+/// part left as it was.
+#[test]
+fn two_rounds_side_by_side_at_a_pocket_floor_corner_are_refused_saying_why() {
+    for tangent_chain in [true, false] {
+        let mut s = outline_with_pocket();
+        let before = s.doc.to_json();
+        let edges = if tangent_chain { json!([[300, 150, 10]]) } else { json!([[300, 150, 10], [300, 150, 32]]) };
+        let e = s.execute("solid.fillet", &json!({"edges": edges, "radius": 1.5, "tangent_chain": tangent_chain})).unwrap_err().to_string();
+        assert!(e.contains("not supported yet") && e.contains("at (300.000, 150.000, 25.000)"), "{e}");
+        assert!(e.contains("two rounds side by side round a vertex of four edges would meet in a step there"), "{e}");
+        assert!(!e.contains("status 1001") && !e.contains("Fillet Corner Error"), "{e}");
+        assert_eq!(s.doc.to_json(), before);
+    }
 }
 
 /// A cylinder of diameter `d` and height `h` with a square notch cut into its top rim (4.8 x 4.8
@@ -226,6 +251,44 @@ fn a_refused_fillet_carries_the_kernel_calls_code() {
     let doc = run(&mut s, "document.inspect", json!({"timeline":"summary"}));
     let row = doc["timeline"].as_array().unwrap().iter().find(|r| r["id"] == id).cloned().unwrap();
     assert_eq!(&row["error_code"], timeline_code, "{row}");
+}
+
+/// #22148: a failure's code carries its class into the timeline JSON. A can (a cylinder of radius
+/// 10, open at its top) shelled thicker than its radius is refused by the operations library
+/// itself, before the kernel builds anything ("the wall is too thick: it leaves no room inside
+/// the body", kind 0, `NoRoom`); solidcore classes only its own errors, so the class is
+/// `unclassed`, in the command's error and in the timeline JSON, in full and in short. (The
+/// kernel's classes reach the code through the same copy: `solidcraft_kernel::failure`'s tests.)
+#[test]
+fn a_failures_class_reaches_the_timeline_json() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.change", json!({"name":"wall", "expression":"2 mm"}));
+    run(&mut s, "solid.cylinder", json!({"radius": 10, "height": 20, "body_name": "Can"}));
+    let before = s.doc.as_ref().clone();
+    let e = s.execute("solid.shell", &json!({"faces": [[0, 0, 20]], "thickness": 12})).unwrap_err();
+    let code = e.error_code().cloned().unwrap_or_else(|| panic!("no code: {e}"));
+    assert_eq!((code.kind, code.operation.as_str()), (0, "NoRoom"), "{code}: {e}");
+    assert_eq!(code.class, "unclassed", "{code}: {e}");
+
+    let mut s = Session::new(before);
+    let out = run(&mut s, "solid.shell", json!({"faces": [[0, 0, 20]], "thickness": "wall"}));
+    let id = out["feature"].as_u64().unwrap();
+    let inspected = run(&mut s, "timeline.inspect", json!({"feature":id}));
+    assert!(inspected["error"].is_null() && inspected.get("error_code").is_none(), "{inspected}");
+    s.execute("parameters.change", &json!({"name":"wall", "expression":"12 mm"})).ok();
+    let inspected = run(&mut s, "timeline.inspect", json!({"feature":id}));
+    assert_eq!(inspected["error_code"], json!({"call": code.call, "kind": 0, "operation": "NoRoom", "class": "unclassed"}), "{inspected}");
+    for detail in [json!(true), json!("summary")] {
+        let doc = run(&mut s, "document.inspect", json!({"timeline":detail}));
+        let row = doc["timeline"].as_array().unwrap().iter().find(|r| r["id"] == id).cloned().unwrap();
+        assert_eq!(row["error_code"], inspected["error_code"], "{detail}: {row}");
+    }
+    // a kernel class reaches the reply as the code names it, never as `unclassed`
+    for class in ["refusal", "defect", "port_failure"] {
+        let code = solidcraft_kernel::ErrorCode { call: "blend".into(), kind: 6, operation: "blend::op".into(), class: class.into() };
+        let reply = crate::schema::inspect::ErrorCodeReply::from(&code);
+        assert_eq!(json!(reply)["class"], class);
+    }
 }
 
 /// The application checks surface regularity as well as closure. The three-sided end of
