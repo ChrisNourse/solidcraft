@@ -1676,7 +1676,20 @@ pub fn locate_level_face_on_body(st: &ModelState, body: Option<&str>, name: &str
 /// point lies on none of them or on several (an edge they share), or the pieces are on several
 /// bodies.
 fn split_face_piece(st: &ModelState, name: &str, p: Vec3) -> Option<FaceHit> {
-    if name.is_empty() || !p.is_finite() || legacy_name(name).is_some() || crate::sheet::split_sheet_face_name(name).is_some() || qualified(name) {
+    if !p.is_finite() {
+        return None;
+    }
+    let (bi, pieces) = split_face_pieces(st, name)?;
+    let b = st.bodies.get(bi)?;
+    let mut on = pieces.into_iter().filter_map(|f| on_face(b, f, p));
+    let (face, point) = on.next().filter(|_| on.next().is_none())?;
+    Some(FaceHit { body: bi, face, point, verified: naming::names(b).verified(face), on_point: true })
+}
+
+/// The body and the faces of the pieces the face named `name` is split into, when it is the whole
+/// face's name and all of them (two or more) are on one body.
+fn split_face_pieces(st: &ModelState, name: &str) -> Option<(usize, Vec<usize>)> {
+    if name.is_empty() || legacy_name(name).is_some() || crate::sheet::split_sheet_face_name(name).is_some() || qualified(name) {
         return None;
     }
     let mut pieces: Vec<(usize, usize)> = Vec::new();
@@ -1688,10 +1701,25 @@ fn split_face_piece(st: &ModelState, name: &str, p: Vec3) -> Option<FaceHit> {
     if pieces.len() < 2 || pieces.iter().any(|(other, _)| *other != bi) {
         return None;
     }
-    let b = st.bodies.get(bi)?;
-    let mut on = pieces.iter().filter_map(|&(_, f)| on_face(b, f, p));
-    let (face, point) = on.next().filter(|_| on.next().is_none())?;
-    Some(FaceHit { body: bi, face, point, verified: naming::names(b).verified(face), on_point: true })
+    Some((bi, pieces.into_iter().map(|(_, f)| f).collect()))
+}
+
+/// The piece of a split face nearest `p`, `(body index, face index)`, for a point that lies on none
+/// of them: an extrude's To face stands for its surface, which every piece lies on, and a pattern's
+/// copy keeps the pick where the seed's cut has since taken the face away (#23612).
+pub(crate) fn nearest_split_face_piece(st: &ModelState, name: &str, p: Vec3) -> Option<(usize, usize)> {
+    let (bi, pieces) = split_face_pieces(st, name)?;
+    let mesh = st.bodies.get(bi)?.mesh();
+    mesh.triangles
+        .iter()
+        .zip(&mesh.tri_face)
+        .filter(|(_, f)| pieces.contains(&(**f as usize)))
+        .filter_map(|(tri, f)| {
+            let [a, b, c] = mesh.tri(tri)?;
+            Some((crate::appearance::closest_on_triangle(p, a, b, c).dist(p), *f as usize))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, f)| (bi, f))
 }
 
 fn locate_face_on_body_with(st: &ModelState, body: Option<&str>, name: &str, p: Vec3, round: bool) -> Option<FaceHit> {

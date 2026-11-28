@@ -1504,3 +1504,59 @@ fn extend_the_to_face_must_be_a_boolean() {
         assert!(r.expect_err("refused").to_string().contains("extend_to_face"));
     }
 }
+
+/// #23612: a cut up to a face it splits, patterned about the axis, with the To pick inside the
+/// seed's own footprint: every copy still ends on that face, so four copies remove four cuts.
+#[test]
+fn a_pattern_of_a_cut_that_splits_its_to_face_ends_each_copy_on_it() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": {"origin": [0, 0, 0], "x_dir": [0, 0, -1], "y_dir": [0, 1, 0]}, "name": "rp"}));
+    run(
+        &mut s,
+        "sketch.line",
+        json!({"points": [[10, 15], [10, 17], [-7, 17], [-7, 13], [-5, 13], [-12, 6], [-14, 6], [-14, 3], [-10, 3], [-10, 5], [0, 15], [10, 15]], "infer": false}),
+    );
+    run(&mut s, "sketch.finish", json!({}));
+    run(
+        &mut s,
+        "solid.revolve",
+        json!({"sketch": "rp", "axis": {"origin": [0, 0, 0], "dir": [0, 0, 1]}, "angle": "360 deg", "operation": "new", "name": "b"}),
+    );
+    run(&mut s, "sketch.create", json!({"plane": {"origin": [0, 0, -10], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}, "name": "cs"}));
+    run(
+        &mut s,
+        "sketch.arc.center_point",
+        json!({"center": [0, 0], "start": [-2.257426309670094, -12.802500789158705], "end": [2.2574263096700897, -12.802500789158707]}),
+    );
+    run(
+        &mut s,
+        "sketch.line",
+        json!({"points": [[2.2574263096700897, -12.802500789158707], [1.0418890660015798, -5.908846518073249]], "infer": false}),
+    );
+    run(
+        &mut s,
+        "sketch.arc.center_point",
+        json!({"center": [0, 0], "start": [1.0418890660015798, -5.908846518073249], "end": [-1.041889066001582, -5.908846518073248], "clockwise": true}),
+    );
+    run(
+        &mut s,
+        "sketch.line",
+        json!({"points": [[-1.041889066001582, -5.908846518073248], [-2.257426309670094, -12.802500789158705]], "infer": false}),
+    );
+    run(&mut s, "sketch.finish", json!({}));
+    let whole = run(&mut s, "inspect.measure", json!({}))["bodies"][0]["volume_mm3"].as_f64().unwrap();
+    run(
+        &mut s,
+        "solid.extrude",
+        json!({"sketch": "cs", "operation": "cut", "name": "cx", "direction": "positive", "to": [0, -10, 8], "extend_to_face": true}),
+    );
+    let one = whole - run(&mut s, "inspect.measure", json!({}))["bodies"][0]["volume_mm3"].as_f64().unwrap();
+    run(
+        &mut s,
+        "solid.pattern.circular",
+        json!({"features": ["cx"], "name": "cp", "axis": {"origin": [0, 0, 0], "dir": [0, 0, 1]}, "count": 4, "angle": "360 deg"}),
+    );
+    let all = whole - run(&mut s, "inspect.measure", json!({}))["bodies"][0]["volume_mm3"].as_f64().unwrap();
+    assert!((one - 69.638637155).abs() < 1e-6, "one cut removes {one}");
+    assert!((all - 4.0 * one).abs() < 1e-6, "four copies remove {all}, one cut {one}");
+}
