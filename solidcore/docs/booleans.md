@@ -827,8 +827,21 @@ What the port does today:
   touch, or curves ending there, so the union of such a boss failed or kept a vertex a
   crossing away (`boolean_api.rs`, `a_boss_a_hair_past_a_cut_balls_rim_joins`;
   `solidcore-ops` `boolean.rs`, the half torus's seam).
-  Parallel cones (drill points) are met by the marching intersection and are not decided this
-  way, nor are coplanar faces bounded by such circles.
+  The walls of a cone and a cone or a cylinder with parallel axes that both bound faces are
+  read the same way (`parallel_walls_in_contact`, `surface/cone/p3.rs`): each plane square to
+  the axes cuts them in two circles whose overlap past touching is linear in the height, so
+  over the faces' common heights it is a concave, piecewise linear function, greatest at an end
+  or where a radius equals the axes' distance or the radii are equal. Where it is greatest at an
+  end and nowhere past the contact tolerance, the walls touch at the end circles' touching
+  points (one point, or the generator between the two ends) and cross nowhere; a hole whose
+  wall grazes a hollow cone's inner wall at its rim had its wall traced along the thin lens
+  between the rim circles' crossings, a face of the hole that the merge then found in no region.
+  Faces sharing no more than one height (a drill's point against the other drill's wall, which
+  meet only at their rims) are left to the marching intersection: a touching point there left
+  the other rim unsplit at the end of the walls' touching line
+  (`solidcore-ops` `boolean.rs`, `parallel_holes_a_hair_less_than_tangent_cut_as_touching`).
+  Parallel cones overlapping past the tolerance (drill points) are still met by the marching
+  intersection, and so are coplanar faces bounded by such circles.
 - **A contact at the tolerance.** Each site decides the contact from its own copy of the two
   curves (an edge's circle, a face pair's intersection curve, an osculating circle), the same
   curves by different constructions, a few roundings of their coordinates apart. A boss placed

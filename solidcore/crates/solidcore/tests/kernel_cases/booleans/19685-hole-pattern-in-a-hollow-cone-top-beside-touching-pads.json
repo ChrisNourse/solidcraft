@@ -1,0 +1,515 @@
+{
+  "area": "booleans",
+  "bodies": {
+    "b16": {
+      "keeping_splines": false,
+      "trusted": true
+    },
+    "b3": {
+      "keeping_splines": false,
+      "trusted": true
+    },
+    "b4": {
+      "keeping_splines": false,
+      "trusted": true
+    },
+    "b8": {
+      "keeping_splines": false,
+      "trusted": true
+    }
+  },
+  "calls": [
+    {
+      "inputs": [],
+      "op": "revolve",
+      "outputs": [
+        "b1"
+      ],
+      "params": {
+        "angle": 6.283185307179586,
+        "cap": true,
+        "direction": [
+          -0.0,
+          -0.0,
+          -1.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "profile": [
+          {
+            "line": {
+              "end": [
+                3.0,
+                0.0,
+                0.0
+              ],
+              "start": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.5,
+                0.0,
+                1000.0
+              ],
+              "start": [
+                3.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.0,
+                0.0,
+                1000.0
+              ],
+              "start": [
+                0.5,
+                0.0,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "start": [
+                0.0,
+                0.0,
+                1000.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [],
+      "op": "extrude",
+      "outputs": [
+        "b2"
+      ],
+      "params": {
+        "cap": true,
+        "corner": "curvature",
+        "direction": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "distance": 0.12000000000000455,
+        "draft": 0.0,
+        "profile": [
+          {
+            "line": {
+              "end": [
+                0.46,
+                -0.06,
+                1000.0
+              ],
+              "start": [
+                0.34,
+                -0.06,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.46,
+                0.06,
+                1000.0
+              ],
+              "start": [
+                0.46,
+                -0.06,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.34,
+                0.06,
+                1000.0
+              ],
+              "start": [
+                0.46,
+                0.06,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.34,
+                -0.06,
+                1000.0
+              ],
+              "start": [
+                0.34,
+                0.06,
+                1000.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b3",
+        "b4"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b5"
+      ],
+      "params": {
+        "op": "union"
+      }
+    },
+    {
+      "inputs": [],
+      "op": "extrude",
+      "outputs": [
+        "b6"
+      ],
+      "params": {
+        "cap": true,
+        "corner": "curvature",
+        "direction": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "distance": 0.12009999999997945,
+        "draft": 0.0,
+        "profile": [
+          {
+            "line": {
+              "end": [
+                0.46,
+                0.06,
+                1000.0
+              ],
+              "start": [
+                0.34,
+                0.06,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.46,
+                0.18,
+                1000.0
+              ],
+              "start": [
+                0.46,
+                0.06,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.34,
+                0.18,
+                1000.0
+              ],
+              "start": [
+                0.46,
+                0.18,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.34,
+                0.06,
+                1000.0
+              ],
+              "start": [
+                0.34,
+                0.18,
+                1000.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b5",
+        "b8"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b9"
+      ],
+      "params": {
+        "op": "union"
+      }
+    },
+    {
+      "inputs": [
+        "b9"
+      ],
+      "op": "copy",
+      "outputs": [
+        "b100"
+      ],
+      "params": {}
+    },
+    {
+      "inputs": [
+        "b100"
+      ],
+      "op": "tagged",
+      "outputs": [
+        "b101"
+      ],
+      "params": {
+        "operand": 0
+      }
+    },
+    {
+      "inputs": [
+        "b101"
+      ],
+      "op": "shell",
+      "outputs": [
+        "b102"
+      ],
+      "params": {
+        "open_faces": {
+          "kind": "face",
+          "picked": [
+            {
+              "at": [],
+              "index": 2
+            }
+          ],
+          "points": [
+            [
+              -0.053333333333333316,
+              -0.18666666666666668,
+              1000.0
+            ]
+          ],
+          "tolerance": 1.0001570950291758
+        },
+        "thickness": -0.05
+      }
+    },
+    {
+      "inputs": [],
+      "op": "extrude",
+      "outputs": [
+        "b15"
+      ],
+      "params": {
+        "cap": true,
+        "corner": "curvature",
+        "direction": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "distance": 0.4,
+        "draft": 0.0,
+        "profile": [
+          {
+            "arc": {
+              "axis": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "center": [
+                -0.4,
+                -0.15,
+                999.6
+              ],
+              "end": 6.896285307179586,
+              "radius": 0.05,
+              "reference": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "start": 0.6131
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b102",
+        "b16"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b103"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    },
+    {
+      "inputs": [
+        "b16"
+      ],
+      "op": "transform",
+      "outputs": [
+        "b104"
+      ],
+      "params": {
+        "matrix": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.15,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b103",
+        "b104"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b105"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    },
+    {
+      "inputs": [
+        "b16"
+      ],
+      "op": "transform",
+      "outputs": [
+        "b106"
+      ],
+      "params": {
+        "matrix": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.3,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b105",
+        "b106"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b107"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    }
+  ],
+  "case": "19685-hole-pattern-in-a-hollow-cone-top-beside-touching-pads",
+  "expected": {
+    "body_count": 1,
+    "method": "The tool's three holes are r 0.05, 0.4 deep from z 999.6 to the top at z 1000, centred at x -0.4 and y -0.15, 0, 0.15; the cone is r 3 at z 0 to r 0.5 at z 1000 (k = 0.0025), shelled 0.05 inward with its top removed: inner wall r_i(z) = 3 - k z - 0.05 sqrt(1 + k^2), floor at z 0.05. The holes at y = -0.15 and 0.15 notch the wall; the one at y = 0 lies in the cavity and reaches r 0.45 at the rim, where r_i(1000) = 0.44999984: its wall overlaps the cavity's wall by 1.56e-7 at z 1000 and by less below (0 at z 999.9999375), under the contact tolerance 1e-5, so it touches the wall at the rim's touching point and removes nothing (the exact lens would be 9.2e-16 mm3). Pads: boxes 0.12 x 0.12 x 0.12 and x 0.1201 at x 0.34..0.46, y -0.06..0.06 and 0.06..0.18 on z 1000, add 0.00345744, hollowed to the boxes 0.02 x 0.07 x 0.07 and x 0.0701 (x 0.39..0.41, y -0.01..0.13), less 0.00019614, opening into the cavity (r < 0.45 there). V = frustum pi 1000/3 (3^2 + 3 0.5 + 0.5^2) = 11257.373675 less the cavity frustum pi 999.95/3 (r_i(0.05)^2 + r_i(0.05) r_i(1000) + r_i(1000)^2) = 10714.080346, = 543.293329149, + 0.00345744 - 0.00019614 = 543.296590449, less 2 notches, each the integral over z in [999.6, 1000] of the disk's area outside r_i(z), pi 0.05^2 less the lens of the disk (centre distance sqrt(0.4^2 + 0.15^2)) with the circle r_i(z) (the disk lies inside the outer wall), by Simpson's rule on 4000 intervals of the closed-form lens area: 0.000700421887 each: V = 543.295189605. Replayed as SolidCraft's trace runs it: the primitives' records, the joins, the shell, the first hole's cut, then the pattern's copies at y 0 and 0.15, each the hole's tool moved along y and cut in turn.",
+    "source": "analytic",
+    "sources": [
+      "tangency-labs/solidcraft#19685"
+    ],
+    "tolerance": {
+      "abs_mm": 1e-05
+    },
+    "volume_mm3": 543.2951896051726,
+    "what": "a linear pattern of three holes cut into the rim of a hollowed tall cone whose top carries two touching pads 0.0001 apart in height; the middle hole grazes the cone's inner wall by 1.6e-7 at the rim (stress corpus S5971, S2225): the pattern cuts the two notches and the middle hole touches the wall, where the hole's wall was traced against the cone's along the thin lens between its rim crossings and left a face in no region"
+  },
+  "expressible": true,
+  "operation_expressible": true,
+  "records": "19685-hole-pattern-in-a-hollow-cone-top-beside-touching-pads.bodies.json.gz",
+  "result": [
+    {
+      "body": "Part",
+      "made": "b107"
+    }
+  ],
+  "sources": [
+    "tangency-labs/solidcraft#19685"
+  ],
+  "ungraded": [],
+  "what": "a linear pattern of three holes cut into the rim of a hollowed tall cone whose top carries two touching pads 0.0001 apart in height; the middle hole grazes the cone's inner wall by 1.6e-7 at the rim (stress corpus S5971, S2225): the pattern cuts the two notches and the middle hole touches the wall, where the hole's wall was traced against the cone's along the thin lens between its rim crossings and left a face in no region",
+  "why_not": []
+}
