@@ -1,0 +1,329 @@
+{
+  "area": "booleans",
+  "bodies": {
+    "b23": {
+      "keeping_splines": false,
+      "trusted": true
+    },
+    "b29": {
+      "keeping_splines": false,
+      "trusted": true
+    }
+  },
+  "calls": [
+    {
+      "inputs": [],
+      "op": "revolve",
+      "outputs": [
+        "b22"
+      ],
+      "params": {
+        "angle": 6.283185307179586,
+        "cap": true,
+        "direction": [
+          -0.0,
+          -0.0,
+          -1.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "profile": [
+          {
+            "line": {
+              "end": [
+                3.0,
+                0.0,
+                0.0
+              ],
+              "start": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.5,
+                0.0,
+                1000.0
+              ],
+              "start": [
+                3.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.0,
+                0.0,
+                1000.0
+              ],
+              "start": [
+                0.5,
+                0.0,
+                1000.0
+              ]
+            }
+          },
+          {
+            "line": {
+              "end": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "start": [
+                0.0,
+                0.0,
+                1000.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b23"
+      ],
+      "op": "copy",
+      "outputs": [
+        "b100"
+      ],
+      "params": {}
+    },
+    {
+      "inputs": [
+        "b100"
+      ],
+      "op": "tagged",
+      "outputs": [
+        "b101"
+      ],
+      "params": {
+        "operand": 0
+      }
+    },
+    {
+      "inputs": [
+        "b101"
+      ],
+      "op": "shell",
+      "outputs": [
+        "b102"
+      ],
+      "params": {
+        "open_faces": {
+          "kind": "face",
+          "picked": [
+            {
+              "at": [],
+              "index": 2
+            }
+          ],
+          "points": [
+            [
+              -0.16666666666666666,
+              -3.700743415417188e-17,
+              1000.0
+            ]
+          ],
+          "tolerance": 1.0000369993520233
+        },
+        "thickness": -0.05
+      }
+    },
+    {
+      "inputs": [],
+      "op": "extrude",
+      "outputs": [
+        "b28"
+      ],
+      "params": {
+        "cap": true,
+        "corner": "curvature",
+        "direction": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "distance": 0.4,
+        "draft": 0.0,
+        "profile": [
+          {
+            "arc": {
+              "axis": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "center": [
+                -0.4,
+                -0.15,
+                999.6
+              ],
+              "end": 6.896285307179586,
+              "radius": 0.05,
+              "reference": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "start": 0.6131
+            }
+          }
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b102",
+        "b29"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b103"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    },
+    {
+      "inputs": [
+        "b29"
+      ],
+      "op": "transform",
+      "outputs": [
+        "b104"
+      ],
+      "params": {
+        "matrix": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.15,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b103",
+        "b104"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b105"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    },
+    {
+      "inputs": [
+        "b29"
+      ],
+      "op": "transform",
+      "outputs": [
+        "b106"
+      ],
+      "params": {
+        "matrix": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.3,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "inputs": [
+        "b105",
+        "b106"
+      ],
+      "op": "boolean_tagged",
+      "outputs": [
+        "b107"
+      ],
+      "params": {
+        "op": "subtract"
+      }
+    }
+  ],
+  "case": "19685-hole-pattern-in-a-hollow-cone-top",
+  "expected": {
+    "body_count": 1,
+    "method": "The tool's three holes are r 0.05, 0.4 deep from z 999.6 to the top at z 1000, centred at x -0.4 and y -0.15, 0, 0.15; the cone is r 3 at z 0 to r 0.5 at z 1000 (k = 0.0025), shelled 0.05 inward with its top removed: inner wall r_i(z) = 3 - k z - 0.05 sqrt(1 + k^2), floor at z 0.05. The holes at y = -0.15 and 0.15 notch the wall; the one at y = 0 lies in the cavity and reaches r 0.45 at the rim, where r_i(1000) = 0.44999984: its wall overlaps the cavity's wall by 1.56e-7 at z 1000 and by less below (0 at z 999.9999375), under the contact tolerance 1e-5, so it touches the wall at the rim's touching point and removes nothing (the exact lens would be 9.2e-16 mm3). V = frustum pi 1000/3 (3^2 + 3 0.5 + 0.5^2) = 11257.373675 less the cavity frustum pi 999.95/3 (r_i(0.05)^2 + r_i(0.05) r_i(1000) + r_i(1000)^2) = 10714.080346, = 543.293329149, less 2 notches, each the integral over z in [999.6, 1000] of the disk's area outside r_i(z), pi 0.05^2 less the lens of the disk (centre distance sqrt(0.4^2 + 0.15^2)) with the circle r_i(z) (the disk lies inside the outer wall), by Simpson's rule on 4000 intervals of the closed-form lens area: 0.000700421887 each: V = 543.291928305. Replayed as SolidCraft's trace runs it: the primitives' records, the joins, the shell, the first hole's cut, then the pattern's copies at y 0 and 0.15, each the hole's tool moved along y and cut in turn.",
+    "source": "analytic",
+    "sources": [
+      "tangency-labs/solidcraft#19685"
+    ],
+    "tolerance": {
+      "abs_mm": 1e-05
+    },
+    "volume_mm3": 543.2919283051725,
+    "what": "the same pattern of three holes in the hollowed cone's rim without the pads (#19685's triage): the middle hole grazes the cone's inner wall by 1.6e-7 at the rim; the result was not a closed solid"
+  },
+  "expressible": true,
+  "operation_expressible": true,
+  "records": "19685-hole-pattern-in-a-hollow-cone-top.bodies.json.gz",
+  "result": [
+    {
+      "body": "Part",
+      "made": "b107"
+    }
+  ],
+  "sources": [
+    "tangency-labs/solidcraft#19685"
+  ],
+  "ungraded": [],
+  "what": "the same pattern of three holes in the hollowed cone's rim without the pads (#19685's triage): the middle hole grazes the cone's inner wall by 1.6e-7 at the rim; the result was not a closed solid",
+  "why_not": []
+}

@@ -54,7 +54,11 @@
 //! only while its two crossings lie within `tol` of the generator, the cylinder's own test.
 //! WR-787 (#15429): parallel cylinders that both bound faces and overlap past touching by
 //! up to [`contact_tol_3d`] (`within_contact_tol`) touch along one line; bare surfaces keep
-//! two crossings.
+//! two crossings. Not upstream: the walls of a cone and a cone or cylinder with parallel axes
+//! that both bound faces are read by the same rule (`parallel_walls_in_contact`): where their
+//! overlap over the faces' common heights is greatest at an end and within the contact
+//! tolerance, they touch at the end circles' touching points instead of going to the general
+//! intersection, which traced the thin lens between the end circles' crossings.
 //! No input-driven recursion is introduced.
 
 use super::{Cone, ConeStepInversion};
@@ -863,8 +867,15 @@ impl Cone {
             {
                 return Ok(false);
             }
+            // walls a hair less than tangent touch where both are faces' (`within_contact_tol`)
+            let faces = surfaces
+                .iter()
+                .all(|s| s.is_some_and(|s| s.owner_zone_tol_3d().is_some()));
             if !self.is_cylinder() || !other.is_cylinder() {
-                return Ok(true);
+                if !faces || distance <= tol {
+                    return Ok(true);
+                }
+                return parallel_walls_in_contact(k, self, domain, other, other_domain, tol, out);
             }
             // Face domains can be shorter than either underlying cylinder, where
             // upstream spans the full cylinders (WR-259). Work relative to
@@ -938,9 +949,6 @@ impl Cone {
             let start = bottom + param * axis;
             // walls a hair less than tangent touch along one line where both are faces'
             // (WR-787, #15429); bare surfaces keep upstream's two crossings
-            let faces = surfaces
-                .iter()
-                .all(|s| s.is_some_and(|s| s.owner_zone_tol_3d().is_some()));
             let intersection = circle_coplanar_circle_intersect_in_contact(
                 axis,
                 start,
@@ -1089,6 +1097,168 @@ impl Cone {
         }
         Ok(false)
     }
+}
+
+/// Not upstream: the walls of two cones with parallel axes, one of them not a cylinder, that
+/// both bound faces, read by the contact rule (`within_contact_tol`, docs/booleans.md §6), as
+/// the walls of parallel cylinders are. Every plane square to the axes cuts the walls in two
+/// circles, whose radii are linear in the height and whose centres lie a fixed distance
+/// apart, so the two ways they overlap past touching, `r1 + r2 - d` from outside and
+/// `d - |r1 - r2|` one inside the other, are linear in the height, and the overlap, the
+/// smaller of the two, is concave and piecewise linear: over the faces' common heights it is
+/// greatest at an end or where a radius equals `d` or the radii are equal.
+///
+/// Where it is nowhere past the contact tolerance and greatest at an end, the walls cross
+/// nowhere inside the faces: the end circles touch or are apart by
+/// `circle_coplanar_circle_intersect_in_contact`, which reads the faces' end edges the same way,
+/// and the walls touch at each end circle's touching point, along the generator between the two
+/// when both ends touch. A traced curve would instead follow the thin lens in which the walls
+/// lie within that tolerance of each other from one crossing of the end circles to the other
+/// (a hole whose wall grazes a hollow cone's inner wall at its rim), whose ends the end edges'
+/// touch does not have.
+///
+/// Returns whether the general intersection is still needed: where the overlap is past the
+/// contact tolerance, greatest between the ends, or a radius is negative.
+fn parallel_walls_in_contact(
+    k: &Kernel,
+    cone: &Cone,
+    domain: &Extent2d,
+    other: &Cone,
+    other_domain: &Extent2d,
+    tol: f64,
+    out: &mut SurfaceIntersection,
+) -> Result<bool> {
+    let axis = cone.rev().position().z_axis();
+    let origin = cone.rev().position().origin();
+    let other_axis = other.rev().position().z_axis();
+    let other_origin = other.rev().position().origin();
+    let trim = cone.convert_domain_from_nurbs_to_step(k, domain)?;
+    let other_trim = other.convert_domain_from_nurbs_to_step(k, other_domain)?;
+    // Heights along `axis` from `origin`, this cone's STEP v; the other's v at height `h` is
+    // `(h - base) * sign`, its axis parallel or antiparallel.
+    let base = line_closest_point(origin, axis, other_origin);
+    let sign = if axis.dot(other_axis) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let other_ends = [
+        base + sign * other_trim.v_min(),
+        base + sign * other_trim.v_max(),
+    ];
+    let low = max2(trim.v_min(), min2(other_ends[0], other_ends[1]));
+    let high = min2(trim.v_max(), max2(other_ends[0], other_ends[1]));
+    if low.is_nan() || high.is_nan() || low > high {
+        return Ok(true);
+    }
+    let circles = |h: f64| {
+        let centre = origin + h * axis;
+        let other_centre = other_origin + ((h - base) * sign) * other_axis;
+        let gap = other_centre - centre;
+        let distance = (gap - gap.dot(axis) * axis).length();
+        (
+            centre,
+            cone.radius(h),
+            other_centre,
+            other.radius((h - base) * sign),
+            distance,
+        )
+    };
+    let overlap = |h: f64| {
+        let (_, r1, _, r2, d) = circles(h);
+        min2(r1 + r2 - d, d - (r1 - r2).abs())
+    };
+    let (_, r1_low, _, r2_low, d) = circles(low);
+    let (_, r1_high, _, r2_high, _) = circles(high);
+    if min2(min2(r1_low, r1_high), min2(r2_low, r2_high)) < 0.0 {
+        return Ok(true);
+    }
+    // The breakpoints between the ends: a radius equal to the distance, or the radii equal.
+    let slope1 = cone.tan_semi_angle();
+    let slope2 = sign * other.tan_semi_angle();
+    let mut inner = Vec::new();
+    for (rate, offset) in [
+        (slope1, r1_low - d),
+        (slope2, r2_low - d),
+        (slope1 - slope2, r1_low - r2_low),
+    ] {
+        if rate.abs() > 0.0 {
+            let h = low - offset / rate;
+            if h > low && h < high {
+                inner.push(h);
+            }
+        }
+    }
+    let ends = max2(overlap(low), overlap(high));
+    if inner.into_iter().any(|h| overlap(h) > ends) {
+        return Ok(true);
+    }
+    let size = origin.max_dimension().max(other_origin.max_dimension())
+        + max2(max2(r1_low, r1_high), max2(r2_low, r2_high))
+        + max2(low.abs(), high.abs());
+    let contact = contact_tol_3d(k);
+    if !within_contact_tol(ends, contact, size) {
+        return Ok(true);
+    }
+    let mut touches = Vec::new();
+    for h in [low, high] {
+        let (centre, r1, other_centre, r2, _) = circles(h);
+        match circle_coplanar_circle_intersect_in_contact(
+            axis,
+            centre,
+            r1,
+            other_centre,
+            r2,
+            tol,
+            contact,
+        )? {
+            CircleCircle::None => {}
+            CircleCircle::Tangent(p) => touches.push(p),
+            CircleCircle::Crossing(..) | CircleCircle::Coincident => return Ok(true),
+        }
+    }
+    let (curve, kind, test_point) = match touches.as_slice() {
+        [] => return Ok(false),
+        [p] => (None, TsectCurveType::Touching, *p),
+        [p, q] if p.distance(*q) < tol => (None, TsectCurveType::Touching, *p),
+        [p, q] => {
+            let length = p.distance(*q);
+            let line = Line::bounded(
+                *p,
+                (*q - *p).unitize()?,
+                &Extent1d::from_min_max(0.0, length),
+                &BoundedLineOptions {
+                    scale: 1.0,
+                    ..BoundedLineOptions::default()
+                },
+            );
+            (Some(line), TsectCurveType::Tangent, *p + 0.5 * (*q - *p))
+        }
+        _ => return Ok(true),
+    };
+    // Both walls must hold the touch: its heights are the faces' own, so only where it lies
+    // round each axis is left to decide, to the tolerance the heights were matched with.
+    let zero = EFF_ZERO * (1.0 + test_point.max_dimension());
+    let (Some(inv), Some(other_inv)) = (
+        intersection_inversion(cone, k, test_point, zero)?,
+        intersection_inversion(other, k, test_point, zero)?,
+    ) else {
+        return Ok(false);
+    };
+    if inv.location == LocationType::Exterior || other_inv.location == LocationType::Exterior {
+        return Ok(false);
+    }
+    let uv = nurbs_uv_status_ignored(cone, k, inv.uv)?;
+    let other_uv = nurbs_uv_status_ignored(other, k, other_inv.uv)?;
+    if !domain.contains_point(uv, tol) || !other_domain.contains_point(other_uv, tol) {
+        return Ok(false);
+    }
+    let curve = match curve {
+        Some(line) => Curve::from(line),
+        None => Curve::from(BSplineCurve::create_degenerate_curve(3, test_point)?),
+    };
+    add(out, curve, kind);
+    Ok(false)
 }
 
 // The native intersection ignores STEPInversion's status, then skips an
