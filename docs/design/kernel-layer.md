@@ -685,6 +685,62 @@ That holds by construction and is checked on every pull request.
   solidcore forced through `export` → `import` and tag-and-read history on every operation. It
   proves the exchange and the renumbering exact before any foreign kernel is involved.
 
+
+### Stage 2: names of a body another kernel holds (2026-11-28)
+
+Stage 1 (§12, "Decoupling stages") draws and picks a held body without its record. Stage 2 names
+it without its record, and resolves saved names against it. Nothing about names moves into the
+file: a saved name stays the string it is today (`F5:side:l1`, `F2:top#[F2:side:l4,F4:side:l4]`,
+`A|B~k`), and it resolves through the timeline's histories and the body's topology as today.
+Only where that topology and those histories come from changes.
+
+**What the kernel gives.** Two optional answers on `HeldBody`, both in the kernel's own ids:
+
+- **`topology()`**: regions, each a list of shells; each shell a list of oriented faces; each face
+  its loops in the kernel's stored order, each loop its oriented edges; each edge its two vertices.
+  Topology only, no geometry. This is the walk the record's canonical order is defined on
+  (`docs/native-brep.md`, "Canonical order").
+- **the op's history** as `ExactHistory`, which already exists for exact bodies (§3), over the
+  operands' kernel ids.
+
+A kernel that gives neither has the router read the record, counted, as in stages 0 and 1.
+
+**What the router does with them.** It walks the topology in canonical order (regions, shells,
+oriented faces, loops, oriented edges, vertices) and numbers faces, edges and vertices as they
+are first met. That gives a map from the kernel's ids to canonical indices with no record and no
+geometry. The walk is the same one that orders an exported record, so the numbers are the ones
+the record would have. The router renumbers the history through the map, checks it as today
+(`BodyHistory::check`: one entry per face and edge, every origin in range), and answers
+`Body::history()`. Display and pick answers (stage 1) are renumbered through the same map, so
+they no longer need the kernel to number its answers as its record does.
+
+**What the document reads.** Today naming and lookup read `record().faces[f].loops`,
+`record().edges[e].uses` and `record().vertices` (`naming.rs`, `name_lookup.rs`,
+`history_names.rs`; about 25 sites). They move onto one kernel-neutral view, `Body::topology()`:
+faces with their loops of oriented edges, edges with their faces and vertices, all in canonical
+indices. A solidcore body answers it by borrowing its record, with no copy and nothing new
+computed, so its names cannot change. A held body answers it from the renumbered topology. Every
+site keeps its order of iteration, so the strings it builds are byte-identical.
+
+**Geometric fallback names.** Names made from geometry (faces with no exact history, pieces told
+apart by place) already read the display mesh's `tri_face`. For a held body, that mesh comes from
+the kernel (stage 1) and is renumbered like everything else. These names stay marked unverified,
+as on solidcore.
+
+**What still reads the record after stage 2.** Face certificates that read a face's surface
+(`with_*_certificate`, `FaceSource`), the edge nearest a point (`Body::edge_lines`), and sheet
+metal's role rules read geometry, not topology. They move with stage 3's queries.
+
+**Gates, on every stage 2 pull request:**
+
+- the naming corpus (180/180 identical) on solidcore, and again with the loopback kernel, which
+  holds every result as a held body that answers `topology()` and its history and exports nothing
+  unless asked: the proof that names come out identical without the record;
+- the kernel rig, base against branch, 0 differ;
+- real saved designs (the corpus's `.sc` files and the action-matrix designs) opened, rebuilt and
+  saved before and after, with identical stored names and identical rebuilt bodies;
+- the record-read counter from stage 0, showing naming and lookup of a held body read no record.
+
 ---
 
 ## 5. Designs record their kernel
