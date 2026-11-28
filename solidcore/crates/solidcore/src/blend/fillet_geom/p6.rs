@@ -467,18 +467,20 @@ impl<M: TrimOriginalSurfacesMarks> FaceTraversalMarks for TrimTraversalMarks<'_,
 /// chain of `side_eus` edges that leads from `start_fv` to `end_fv`, each with its UV
 /// trim curve (`GetUVTrimCurve`: the use's or its mate's) and its orientation along
 /// the chain. When every UV curve of the lists is present the chain is tested in UV
-/// space: a side edge whose UV start is more than the UV tolerance from the chain's end
-/// is skipped beyond 20 times that tolerance, or when the fillet surface puts the two
+/// space: a side edge whose UV start is more than `uv_tol` from the chain's end is
+/// skipped when the gap is too large in UV, or when the fillet surface puts the two
 /// points more than ten times the solver's tolerance apart. Returns `rbMadeConnection`:
 /// whether the chain reached `end_fv`. `g` is the fillet geometry (`fb`'s), `solvers`
 /// resolves its solver.
 ///
 /// `uv_tol` is the caller's 3D tolerance mapped to the fillet surface's parameters along
-/// u, at the middle of the surface. A gap is tested against that tolerance turned to the
-/// gap's own direction ([`uv_tol_towards`]; not upstream, #18204: upstream tests every gap
-/// against `uv_tol`, so a gap across the round, where a parameter step covers far less
-/// length than along it, was skipped as too large while inside the tolerance in 3D). A
-/// gap along u, and any gap of a geometry without fillet surface, has `uv_tol` itself.
+/// u, at the middle of the surface. Too large in UV is more than 20 times that tolerance
+/// turned to the gap's own direction ([`uv_tol_towards`]; not upstream, #18204: upstream
+/// skips beyond `20 * uv_tol` in every direction, so a gap across the round, where a
+/// parameter step covers far less length than along it, was skipped while inside the
+/// tolerance in 3D). Along u, for a gap of no length and for a geometry without fillet
+/// surface, that is `20 * uv_tol`. Every gap over `uv_tol` that is kept has passed the 3D
+/// test.
 ///
 /// # Errors
 ///
@@ -638,18 +640,21 @@ pub(super) fn join_two_fillet_verts_by_curves_resolved<'s>(
                 let start_pnt = side_uv.evaluate_point(k, start_param)?;
                 let uv_dist = start_pnt.distance(end_pnt);
 
-                // (not upstream; #18204) `uv_tol` is the tolerance of a gap along u;
-                // the tolerance of this gap is the one in its own direction
-                let gap_tol = match fillet_surface {
-                    Some(surface) => {
-                        let gap = Vec2::new(start_pnt.x - end_pnt.x, start_pnt.y - end_pnt.y);
-                        let tol_3d = crate::geom::tol::approx_tol3d(k, d3d_tolerance);
-                        uv_tol_towards(k, surface, tol_3d, uv_tol, gap)?
-                    }
-                    None => uv_tol,
-                };
+                if uv_dist > uv_tol {
+                    // (not upstream; #18204) `uv_tol` is the tolerance of a gap along
+                    // u; the gap is too large by the tolerance in its own direction
+                    let gap_tol = match fillet_surface {
+                        Some(surface) if uv_dist > 0.0 => {
+                            let dir = Vec2::new(
+                                (start_pnt.x - end_pnt.x) / uv_dist,
+                                (start_pnt.y - end_pnt.y) / uv_dist,
+                            );
+                            let tol_3d = crate::geom::tol::approx_tol3d(k, d3d_tolerance);
+                            uv_tol_towards(k, surface, tol_3d, uv_tol, dir)?
+                        }
+                        _ => uv_tol,
+                    };
 
-                if uv_dist > gap_tol {
                     // skip curves with large gaps
                     if uv_dist > 20.0 * gap_tol {
                         ii += 1;
@@ -3806,6 +3811,107 @@ mod tests {
             Some(FaceId::from_index(7))
         );
         assert!(fb.brep().edge(rails_b[0]).unwrap().curve.is_some());
+    }
+
+    /// The patch `(u, v) -> (66 u, 1.26 v, 0)` over the unit square: a round 66 long
+    /// whose arc is 1.26 long.
+    fn round_like_patch() -> Surface {
+        let net = vec![
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, NOW),
+                CPoint::new(0.0, 1.26, 0.0, NOW),
+            ],
+            vec![
+                CPoint::new(66.0, 0.0, 0.0, NOW),
+                CPoint::new(66.0, 1.26, 0.0, NOW),
+            ],
+        ];
+        let nl = crate::nurbs::srf_basic::Surface::new(
+            net,
+            1,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        Surface::from(crate::nurbs::b_spline_surface::BSplineSurface::from_nurb(
+            nl, false,
+        ))
+    }
+
+    /// #18204: the join in UV, on a surface 66 long along u and 1.26 along v with the
+    /// tolerance 4e-5 (`uv_tol` 4e-5 / 66 = 6.06e-7). The chain ends at uv (1, 0) and the
+    /// side edge starts off it by `gap`. Whether it is joined follows the 3D gap, not
+    /// the gap's length in UV alone.
+    #[test]
+    fn join_in_uv_judges_a_gap_by_its_direction_and_its_3d_length() {
+        let k = Kernel::default();
+        let tol = 4e-5;
+        let uv_tol = tol / 66.0;
+        let joined = |gap: [f64; 2]| {
+            let mut fb = FilletBrep::new();
+            let (g, rails) = two_rail_geom(&mut fb, &k);
+            fb.geom_mut(g)
+                .unwrap()
+                .set_fillet_surface(Some(round_like_patch()));
+            let solvers = [FilletSolver::new(tol, 1e-3, 1e-6)];
+            let start = fb.rail_vertex(g, 0, 1).unwrap();
+            let end = fb.rail_vertex(g, 1, 1).unwrap();
+            let (side, eus) = edge_with_uses(&mut fb, start, end, FilletEdgeType::CrossSection);
+            fb.brep_mut().edge_mut(side).unwrap().curve = Some(line(
+                Point3::new(66.0, 0.0, 0.0),
+                Point3::new(66.0, 1.26, 0.0),
+                0.0,
+                1.0,
+                3,
+            ));
+            fb.brep_mut().edgeuse_mut(eus[0]).unwrap().uv_trim_curve = Some(line(
+                Point3::new(1.0 + gap[0], gap[1], 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                0.0,
+                1.0,
+                2,
+            ));
+            fb.geom_mut(g).unwrap().add_side_fillet_edgeuse(eus[0]);
+            let mut c3 = vec![fb.brep().edge(rails[0]).unwrap().curve.clone()];
+            let mut cuv = vec![Some(line(
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                0.0,
+                1.0,
+                2,
+            ))];
+            let mut orients = vec![OrientType::Same];
+            let sides = fb.geom(g).unwrap().side_eus.clone();
+            join_two_fillet_verts_by_curves(
+                &k,
+                &fb,
+                g,
+                Some(start),
+                Some(end),
+                &sides,
+                uv_tol,
+                &mut c3,
+                &mut cuv,
+                &mut orients,
+                &solvers,
+            )
+            .unwrap()
+        };
+        // no gap, and a gap along u inside uv_tol
+        assert!(joined([0.0, 0.0]));
+        assert!(joined([5e-7, 0.0]));
+        // across the round, 1.6e-5 in UV is 2.0e-5 in 3D, inside the tolerance: joined
+        // (upstream skips it, as over 20 * uv_tol = 1.2e-5)
+        assert!(joined([0.0, 1.6e-5]));
+        assert!(joined([0.0, -1.6e-5]));
+        // along u, 2e-5 in UV is 1.3e-3 in 3D: skipped, as upstream
+        assert!(!joined([2e-5, 0.0]));
+        // both ways at once, (1e-5, 1e-5) is 6.6e-4 in 3D, over 10 * 4e-5: skipped
+        assert!(!joined([1e-5, 1e-5]));
+        assert!(!joined([-1e-5, 1e-5]));
+        // across the round, 1e-3 in UV is 1.26e-3 in 3D: skipped
+        assert!(!joined([0.0, 1e-3]));
     }
 
     #[test]
