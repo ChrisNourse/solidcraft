@@ -2,6 +2,48 @@
 
 Status: approved by the owner in full. He approved phase 1, the seam (§12), on 2026-11-24, and on 2026-11-26 every later phase of §12 as well: "I asked for it". Phase 1 is the kernel interface in SolidCraft, the solidcore adapter behind it, and SolidCraft calling the kernel only through that interface. No second kernel is planned or being built. On 2026-11-28 he amended the body format: "basically if solidcore is deleted it should still work". A body now lives in its own kernel's form, and the record is an exchange format only (§3; the stages are in §12). The later sections describe what the seam must allow, so that the interface is right the first time; they are not a plan to add another kernel.
 
+## Why we're doing this
+
+**The problem today.** App code reaches straight into solidcore's B-rep structs: about 3,430
+references across 14 crates. That has three costs:
+
+- Any other kernel's body has to be converted into solidcore's format after every operation.
+- A refactor inside the kernel breaks app code.
+- "Any kernel can plug in" isn't really true yet.
+
+**The goal.** If solidcore were deleted, SolidCraft should still build and run on another
+kernel. I want high cohesion and low coupling:
+
+- each kernel owns its own bodies;
+- the app talks to a kernel only through `kernel-api`.
+
+**What it buys us.**
+
+- **A stable, versioned kernel contract.** That pushes solidcore to be stable too.
+- **solidcore stands on its own.** It can be tested and refactored without the app in the way.
+- **"Does it run on SolidCraft" becomes real.** A kernel plugs in through an adapter and is tested
+  on the same cases as solidcore.
+- **No conversion on every operation.** A body stays in its own kernel's form.
+
+**The risks, and how we guard against them.**
+
+- **Naming and history is the riskiest stage.** The guard is the full rig and the naming corpus,
+  plus reopening real saved designs before and after each change, with identical results.
+- **The API could copy solidcore's quirks.** The guard is a stub kernel: every call must be
+  something it can implement cleanly.
+- **The extra layer costs a little.** The guard is measuring that cost at every stage, and
+  solidcore's own path stays at zero conversions.
+
+**What changes for contributors.**
+
+- **No new direct solidcore imports in app crates.** A CI check enforces it
+  (`xtask/kernel-coupling.txt`, checked by `cargo xtask layers`). The list only shrinks: when you
+  remove uses, `cargo xtask layers --kernel-coupling-shrink` updates it.
+- **Kernel geometry still goes in solidcore.** App code reaches it through `kernel-api`.
+- **Existing code isn't blocked.** It moves over stage by stage (§12).
+- **Saved designs keep working.** The timeline stays the source of truth, so any kernel replays
+  it (§3).
+
 The owner's brief (2026-11-24):
 
 > solidcore/ops is the solidcore one... then we have one in SOLIDCRAFT NOT SOLIDCORE that is where

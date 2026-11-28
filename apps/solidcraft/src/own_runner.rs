@@ -132,7 +132,10 @@ impl runner::App for OnRunner {
 /// the same viewport, device setup, settings file and app. `x11` starts winit on X11 (Linux).
 pub fn run(
     options: eframe::NativeOptions,
-    creator: impl FnOnce(&eframe::CreationContext<'_>) -> Result<crate::App, Box<dyn std::error::Error + Send + Sync>>,
+    creator: impl FnOnce(
+        &eframe::CreationContext<'_>,
+        Option<std::sync::Arc<winit::window::Window>>,
+    ) -> Result<crate::App, Box<dyn std::error::Error + Send + Sync>>,
     x11: bool,
     wake: &crate::control_server::Wake,
 ) -> eframe::Result {
@@ -164,7 +167,7 @@ pub fn run(
     let failed_in_create = failed.clone();
     let wake = wake.clone();
     let ran = runner::run(run_options, move |created: Created| {
-        let Created { ctx, render_state, waker } = created;
+        let Created { ctx, render_state, waker, window } = created;
         wake.set(move || waker.run_logic());
         if let Some(memory) = settings.kv.get(EGUI_MEMORY).and_then(|m| ron::from_str::<egui::Memory>(m).ok()) {
             ctx.memory_mut(|m| *m = memory);
@@ -172,7 +175,8 @@ pub fn run(
         let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
         cc.storage = Some(&settings);
         cc.wgpu_render_state = render_state.clone();
-        let made = creator(&cc);
+        // eframe's `CreationContext` has no window here; the app takes ours.
+        let made = creator(&cc, window);
         drop(cc);
         let mut frame = eframe::Frame::_new_kittest();
         frame.wgpu_render_state = render_state;

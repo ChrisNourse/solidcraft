@@ -634,7 +634,7 @@ fn same_shared<T: PartialEq>(a: &Option<std::sync::Arc<T>>, b: &Option<std::sync
 /// `record`, checked to be a body's: valid structure (references, loops, regions,
 /// canonical order) and at least one face. A solid's faces bound material; a surface body's lie
 /// in open shells.
-fn solid_record(record: Brep) -> Result<Brep> {
+pub(crate) fn solid_record(record: Brep) -> Result<Brep> {
     // The record validator exposes its reason as a static string. Identify the
     // ceiling check here so pattern evaluation can give advice for that failure.
     solidcore_ops::record_check::validate_built(&record).map_err(|e| match e.0 {
@@ -1610,7 +1610,14 @@ impl Body {
     }
 
     /// Error for operations that need a B-rep.
+    #[track_caller]
     pub(crate) fn require_brep(&self, what: &str) -> Result<()> {
+        if let RecordCell::Held(h) = &self.record {
+            let _ = h.record(std::panic::Location::caller());
+            if let Some(why) = h.failure() {
+                return Err(KernelError::Failed(format!("{what}: {why}")));
+            }
+        }
         if self.is_mesh() {
             Err(KernelError::Invalid(format!("{what} needs a solid body; mesh bodies can only be moved, measured and exported")))
         } else {

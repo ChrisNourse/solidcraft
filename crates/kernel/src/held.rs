@@ -19,7 +19,8 @@ use solidcraft_kernel_api::HeldBody;
 /// A held body and its record once made ([`crate::body::RecordCell::Held`]).
 pub(crate) struct HeldCell {
     pub(crate) body: Arc<dyn HeldBody>,
-    made: OnceLock<Arc<Brep>>,
+    /// The record once made, and why the body did not give one when it did not.
+    made: OnceLock<(Arc<Brep>, Option<String>)>,
     reads: AtomicU64,
 }
 
@@ -35,29 +36,38 @@ impl HeldCell {
     }
 
     /// The record, exported the first time it is read; every read counted at `at`. A body that
-    /// does not export, or exports a record that fails the record check, reads as an empty
-    /// record (logged), as a body with nothing in it.
+    /// does not export (or panics exporting), or exports a record that fails the record check,
+    /// reads as an empty record, and every operation on it is refused with why
+    /// ([`HeldCell::failure`], [`crate::Body::require_brep`]): never taken as a body with nothing
+    /// in it.
     pub(crate) fn record(&self, at: &'static Location<'static>) -> &Arc<Brep> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         note(at, false);
-        self.made.get_or_init(|| {
-            note(at, true);
-            let backend = self.body.backend();
-            log::trace!("the record of a body {backend} holds is made, read at {}:{}", at.file(), at.line());
-            match self.body.export() {
-                Ok(out) => match solidcore_ops::record_check::validate_built(&out.record) {
-                    Ok(()) => Arc::new(out.record),
+        &self
+            .made
+            .get_or_init(|| {
+                note(at, true);
+                let backend = self.body.backend();
+                log::trace!("the record of a body {backend} holds is made, read at {}:{}", at.file(), at.line());
+                let made = crate::guard("held body export", || {
+                    let out = self.body.export().map_err(crate::KernelError::from)?;
+                    crate::body::solid_record(out.record)
+                });
+                match made {
+                    Ok(record) => (Arc::new(record), None),
                     Err(e) => {
-                        log::error!("a body {backend} holds exported a record that fails the check ({e}); it reads as empty");
-                        Arc::new(crate::body::empty_record())
+                        let why = format!("the body {backend} holds gives no record ({e})");
+                        log::error!("{why}");
+                        (Arc::new(crate::body::empty_record()), Some(why))
                     }
-                },
-                Err(e) => {
-                    log::error!("a body {backend} holds did not export ({e}); it reads as empty");
-                    Arc::new(crate::body::empty_record())
                 }
-            }
-        })
+            })
+            .0
+    }
+
+    /// Why the body gave no record, once its record was read and it did not.
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.made.get().and_then(|(_, why)| why.as_deref())
     }
 
     /// Whether the record was made.
@@ -201,5 +211,7 @@ mod tests {
         let held = Body::held(Arc::new(Refuses));
         assert!(held.record().faces.is_empty());
         assert!(crate::measure_mass(&held).is_err());
+        let refused = crate::boolean(&held, &held_box().0, crate::BoolOp::Union);
+        assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("gives no record")), "{refused:?}");
     }
 }
