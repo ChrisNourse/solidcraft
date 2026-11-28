@@ -14535,14 +14535,15 @@ fn feature_tools_with_constructor(
             }
             regions.iter().map(|r| Ok(tool(r, kernel::sweep_with(&ss.plane, r, &segs, &ctl)?))).collect()
         }
-        FeatureKind::Pipe { path_sketch, path, path_body, path_edges, diameter, wall, .. } => {
+        FeatureKind::Pipe { path_sketch, path, path_body, path_edges, diameter, wall, operation, .. } => {
             let r = val(vals, diameter, Kind::Length)? / 2.0;
             if !(r > 1e-6) {
                 return Err(DocError::Invalid("pipe diameter must be positive".into()));
             }
             let region = pipe_region(vals, r, wall)?;
             // Its faces are named as a sweep's caps and a cylinder's wall are (#14897).
-            let tool = |body: Body| crate::lineage::pipe_tool(body, region.outer.segs.len());
+            let own_body = *operation == Operation::NewBody;
+            let tool = |body: Body| crate::lineage::pipe_tool(body, region.outer.segs.len(), own_body);
             // The path is a chain of a body's edges (#16084), in the chain's own order, or the
             // curves of a sketch.
             let segs = match path_body {
