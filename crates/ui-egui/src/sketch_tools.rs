@@ -2228,15 +2228,17 @@ fn run_points(app: &mut SolveApp, t: &Tool) -> bool {
 /// Drops the picks of a curve-picking tool that no longer name a curve or point of the active
 /// sketch, with their click places, so the user picks again instead of the command refusing the
 /// stale id on every try: the Undo button can take away a picked curve and leaves the tool on
-/// (#23086). The constraint tools that pick entities (Parallel, Coincident, ...) drop theirs too,
-/// a preselected pick included, and Horizontal and Vertical their first point (#23602). An origin
-/// axis pick (`x`, `y` or a JSON reference) is kept. Run on every frame before the value boxes
-/// are decided, so 2-Tangent Circle's Radius box goes with the pair. After a drop the boxes start
-/// over and true is returned, for the caller to show the hint.
+/// (#23086). The constraint tools that pick entities (Parallel, Coincident, ...) drop theirs too, a
+/// preselected pick included, and Horizontal and Vertical their first point (#23602). The
+/// construction line tools drop a lost reference curve, and a segment's start with it (#23702). An
+/// origin axis pick (`x`, `y` or a JSON reference) is kept. Run on every frame before the value
+/// boxes are decided, so 2-Tangent Circle's Radius box goes with the pair. After a drop the boxes
+/// start over and true is returned, for the caller to show the hint.
 pub(crate) fn drop_gone_picks(app: &SolveApp, t: &mut Tool) -> bool {
     let entities = matches!(mode(t.cmd), Some(Mode::Entities(_)));
+    let construction = matches!(mode(t.cmd), Some(Mode::Construction));
     let aligns = t.kind == crate::tools::Kind::HorizontalVertical;
-    if !(entities || aligns || matches!(t.kind, crate::tools::Kind::Pick(_))) || (t.picks.is_empty() && t.point_picks.is_empty()) {
+    if !(entities || construction || aligns || matches!(t.kind, crate::tools::Kind::Pick(_))) || (t.picks.is_empty() && t.point_picks.is_empty()) {
         return false;
     }
     let st = crate::open_meshing::session_world(&app.session);
@@ -2270,8 +2272,9 @@ pub(crate) fn drop_gone_picks(app: &SolveApp, t: &mut Tool) -> bool {
     t.picks.retain(|_| flags.next().copied().unwrap_or(true));
     crate::sketch_dims::reset(t);
     // A constraint tool ends on a right-click whatever it holds; only a tool that applies on one
-    // keeps on for it.
-    t.picks_dropped = entities && t.picks.is_empty();
+    // keeps on for it, and a construction line tool, whose right-click clears its reference and
+    // keeps on.
+    t.picks_dropped = (entities || construction) && t.picks.is_empty();
     true
 }
 
