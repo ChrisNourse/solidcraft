@@ -829,7 +829,9 @@ impl Loop2 {
     }
 
     /// Its signed area (positive counter-clockwise), the sum of its segments' Green terms, with a
-    /// proved bound on its rounding.
+    /// proved bound on its rounding. Where a segment ends apart from where the next starts (a
+    /// join left open within its tolerance), the gap counts as the straight chord across it, so
+    /// the area does not depend on where the loop lies; a closed loop has no such terms.
     ///
     /// # Errors
     ///
@@ -838,15 +840,22 @@ impl Loop2 {
         let mut value = 0.0;
         let mut bound = 0.0;
         let mut size = 0.0_f64;
-        for s in &self.segs {
-            let (v, b) = s
-                .area_term()
-                .ok_or_else(|| SolidError::invalid_input(OP_AREA, "a malformed segment"))?;
-            value += v;
-            bound += b;
-            size += v.abs();
+        let mut terms = 0;
+        let nexts = self.segs.iter().cycle().skip(1);
+        for (s, next) in self.segs.iter().zip(nexts) {
+            let (end, start) = (s.end(), next.start());
+            let chord = (end != start).then_some(Seg2::Line { a: end, b: start });
+            for t in std::iter::once(s).chain(chord.as_ref()) {
+                let (v, b) = t
+                    .area_term()
+                    .ok_or_else(|| SolidError::invalid_input(OP_AREA, "a malformed segment"))?;
+                value += v;
+                bound += b;
+                size += v.abs();
+                terms += 1;
+            }
         }
-        bound += gamma(self.segs.len() + 1) * size;
+        bound += gamma(terms + 1) * size;
         if !(value.is_finite() && bound.is_finite()) {
             return Err(SolidError::invalid_input(
                 OP_AREA,

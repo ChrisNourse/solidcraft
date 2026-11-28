@@ -1473,6 +1473,66 @@ fn a_line_is_welded_no_further_than_its_own_tolerance() {
     assert_eq!((segs[0].1, segs[1].1), (line, up), "{segs:?}");
 }
 
+/// A join left open because the weld would move a line further than its tolerance does not
+/// decide the loop's turning: its area is the same wherever the loop lies. A thin strip whose
+/// line meets its arc 5e-6 apart, placed at the origin and 1000 mm along x.
+#[test]
+fn a_loop_left_open_by_the_weld_has_the_same_area_wherever_it_lies() {
+    let gap = 5e-6;
+    let top = gap + 1e-4;
+    let mut areas = Vec::new();
+    for x in [0.0, 1000.0] {
+        let mut segs = [
+            (
+                None,
+                Seg2::Line {
+                    a: p(x, 0.0),
+                    b: p(x + 10.0, 0.0),
+                },
+            ),
+            (
+                None,
+                Seg2::Arc {
+                    center: p(x + 9.9999, gap),
+                    radius: 1e-4,
+                    start: 0.0,
+                    sweep: FRAC_PI_2,
+                },
+            ),
+            (
+                None,
+                Seg2::Line {
+                    a: p(x + 9.9999, top),
+                    b: p(x, top),
+                },
+            ),
+            (
+                None,
+                Seg2::Line {
+                    a: p(x, top),
+                    b: p(x, 0.0),
+                },
+            ),
+        ];
+        let corners = [Some(p(x, 0.0)), Some(p(x + 10.0, 0.0)), None, None];
+        weld_lines(&mut segs, &corners, &[1e-7, 1e-5, 1e-7, 1e-7]);
+        // the line is not moved onto the arc: the loop stays open there
+        assert_eq!(segs[0].1.end(), p(x + 10.0, 0.0));
+        let lp = Loop2 {
+            segs: segs.iter().map(|(_, s)| *s).collect(),
+        };
+        assert!(!lp.is_closed(1e-9));
+        let area = lp.signed_area().unwrap();
+        assert_eq!(area.sign(), Some(true), "at x = {x}: {area:?}");
+        areas.push(area.value);
+    }
+    // the strip less the corner the quarter circle cuts off
+    let want = 10.0 * top - 1e-4 * 1e-4 * (1.0 - PI / 4.0);
+    for a in areas {
+        assert!((a - want).abs() < 1e-9, "{a} against {want}");
+    }
+}
+
 #[test]
 fn sheets_combined_read_back_as_their_regions() {
     let mut k = Kernel::default();
