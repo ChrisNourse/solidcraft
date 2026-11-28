@@ -213,21 +213,24 @@ fn without_face_ties(name: &str) -> Option<crate::persistent_name::EdgeName> {
 }
 
 /// The edge a blend's stored edge name `name` meant when it found edge `found` of body `b` (whose
-/// mesh is `m`) and the blend's own pick `near` does not lie on it: the edge `near` lies on
-/// (exactly, clear of its ends, see [`edge_through`]), when its name differs from `name` only in
-/// the numbers of its faces. Pieces that nothing else tells apart are numbered along where they
-/// lie, and builds have numbered them differently: both caps of an extrude with a start offset are
-/// `top`, and since #21762 the one a design saved by 0.47.0 called `top#1` is `top#2` (#22230).
-/// The point was picked on the edge the name was given to, so it says which one that is, but only
-/// on the body it was picked on: a pick is not updated when an edit moves the body, and then it
-/// can lie on the other cap's edge. The caller checks that the body has not moved: its box is the
-/// saved one, and no earlier feature places bodies whole.
-pub(crate) fn retied_edge(b: &ModelBody, m: &Mesh, name: &str, found: usize, near: Vec3) -> Option<usize> {
-    if b.body.is_mesh() || !near.is_finite() || edge_near(b, m, found, near) {
+/// mesh is `m`) and the blend's own pick `near` does not lie on it, or found no edge at all
+/// (`found` is `None`): the edge `near` lies on (exactly, clear of its ends, see
+/// [`edge_through`]), when its name differs from `name` only in the numbers of its faces. Pieces
+/// that nothing else tells apart are numbered along where they lie, and builds have numbered them
+/// differently: both caps of an extrude with a start offset are `top`, and since #21762 the one a
+/// design saved by 0.47.0 called `top#1` is `top#2` (#22230). Where only one of the caps meets the
+/// edge's other face, the name with the other cap's number finds no edge at all: a round 0.43.0
+/// saved on a flange's `bottom#1|…~1` edge, the cap that is `bottom#2` now (#22418). The point was
+/// picked on the edge the name was given to, so it says which one that is, but only on the body it
+/// was picked on: a pick is not updated when an edit moves the body, and then it can lie on the
+/// other cap's edge. The caller checks that the body has not moved: its box is the saved one, and
+/// no earlier feature places bodies whole.
+pub(crate) fn retied_edge(b: &ModelBody, m: &Mesh, name: &str, found: Option<usize>, near: Vec3) -> Option<usize> {
+    if b.body.is_mesh() || !near.is_finite() || found.is_some_and(|found| edge_near(b, m, found, near)) {
         return None;
     }
     let wanted = without_face_ties(name)?;
-    let j = edge_through(b, m, near).filter(|j| *j != found)?;
+    let j = edge_through(b, m, near).filter(|j| Some(*j) != found)?;
     (without_face_ties(naming::edge_name_index(b).names.get(j)?)? == wanted).then_some(j)
 }
 
@@ -463,8 +466,13 @@ fn recover_numbered_edge_of_split_face(b: &ModelBody, name: &str, near: Vec3) ->
     let [x, y] = parts.as_slice() else { return None };
     let faces = naming::names(b);
     let level = |f: u32, n: &str| crate::history_names::matches(&faces, f as usize, n).filter(|l| exactly(*l));
-    // Both faces answer exactly, and at least one is a piece of the saved face.
-    let between = |p: u32, q: u32| level(p, x).zip(level(q, y)).is_some_and(|(lp, lq)| lp == Match::Piece || lq == Match::Piece);
+    // A piece named after the faces around it. A numbered piece (`F4:top#2`) also answers to a
+    // saved sibling (`F4:top#1`) as a piece, but nothing split it: like-named faces told apart only
+    // by where they lie, whose edges the saved number still tells apart (#22418).
+    let split = |f: u32| faces.faces.get(f as usize).and_then(|n| crate::piece_names::piece_parts(n)).is_some_and(|(_, around)| !around.is_empty());
+    // Both faces answer exactly, and at least one is a piece of the saved face, split since.
+    let between =
+        |p: u32, q: u32| level(p, x).zip(level(q, y)).is_some_and(|(lp, lq)| (lp == Match::Piece && split(p)) || (lq == Match::Piece && split(q)));
     let reach = pick_reach(b);
     let mut on = b.body.record().edges.iter().enumerate().filter(|(i, e)| {
         let [p, q] = e.uses.as_slice() else { return false };
@@ -2356,7 +2364,7 @@ mod tests {
         let e1 = ridx.names.iter().position(|n| n == "F2:side:l1|F2:top#1").unwrap();
         let e2 = ridx.names.iter().position(|n| n == "F2:side:l1|F2:top#2").unwrap();
         let mid2 = edge_mid(&m, e2).unwrap();
-        assert_eq!(retied_edge(&retied_body, &m, &ridx.names[e1], e1, mid2), Some(e2));
+        assert_eq!(retied_edge(&retied_body, &m, &ridx.names[e1], Some(e1), mid2), Some(e2));
         assert!(Arc::ptr_eq(&edge_name_index(&retied_body), &ridx));
     }
 

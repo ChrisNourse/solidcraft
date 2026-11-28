@@ -60,6 +60,10 @@ pub trait App {
     /// Save what the app keeps across runs: every [`App::auto_save_interval`] and before exit.
     fn save(&mut self) {}
 
+    /// The main window's size and place, given just before each [`App::save`] for the app to keep
+    /// (and hand back as [`RunOptions::window_settings`] next run).
+    fn window_settings(&mut self, _settings: egui_winit::WindowSettings) {}
+
     /// How often [`App::save`] runs while the app runs.
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(30)
@@ -92,6 +96,9 @@ pub struct Created {
     pub render_state: Option<RenderState>,
     /// Wakes the loop from other threads.
     pub waker: Waker,
+    /// The main window, for what needs its native handle (its monitor's work area, an X11
+    /// activation request).
+    pub window: Option<Arc<Window>>,
 }
 
 /// Wakes the loop from any thread.
@@ -116,6 +123,9 @@ pub struct RunOptions {
     pub wgpu: WgpuConfiguration,
     pub renderer: egui_wgpu::RendererOptions,
     pub transparent: bool,
+    /// The main window's size and place from the last run, restored when it opens (clamped to
+    /// the monitors there are now), as eframe's `persist_window` does.
+    pub window_settings: Option<egui_winit::WindowSettings>,
 }
 
 /// An error running the window.
@@ -143,7 +153,7 @@ pub enum UserEvent {
 ///
 /// # Errors
 /// The event loop, the main window or the graphics device could not be created.
-pub fn run(mut options: RunOptions, create: impl FnOnce(Created) -> Box<dyn App> + 'static) -> Result<(), RunError> {
+pub fn run<'a>(mut options: RunOptions, create: impl FnOnce(Created) -> Box<dyn App + 'a> + 'a) -> Result<(), RunError> {
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     if let Some(change) = options.event_loop_builder.take() {
         change(&mut builder);
@@ -162,7 +172,14 @@ pub fn run(mut options: RunOptions, create: impl FnOnce(Created) -> Box<dyn App>
     let painter = pollster::block_on(Painter::new(ctx.clone(), options.wgpu, options.transparent, options.renderer));
     let mut viewports = ViewportIdMap::default();
     viewports.insert(ViewportId::ROOT, Viewport::new(ViewportIdPair::ROOT, ViewportClass::Root, options.viewport, None));
-    let shared = Rc::new(RefCell::new(Shared { ctx: ctx.clone(), painter, viewports, by_window: HashMap::new() }));
+    let shared = Rc::new(RefCell::new(Shared {
+        ctx: ctx.clone(),
+        painter,
+        viewports,
+        by_window: HashMap::new(),
+        restore: options.window_settings,
+        normal_geometry: None,
+    }));
     egui::Context::set_immediate_viewport_renderer({
         let shared = Rc::downgrade(&shared);
         move |ctx, immediate| match shared.upgrade() {
@@ -225,6 +242,10 @@ struct Shared {
     painter: Painter,
     viewports: ViewportIdMap<Viewport>,
     by_window: HashMap<WindowId, ViewportId>,
+    /// The main window's settings to restore when it opens.
+    restore: Option<egui_winit::WindowSettings>,
+    /// The main window's last size and place while neither maximized nor fullscreen.
+    normal_geometry: Option<egui_winit::WindowGeometry>,
 }
 
 impl Shared {
@@ -234,6 +255,14 @@ impl Shared {
         pending.sort_by_key(|id| *id != ViewportId::ROOT);
         for id in pending {
             let Some(viewport) = self.viewports.get_mut(&id) else { continue };
+            let restore = if id == ViewportId::ROOT { self.restore.take() } else { None };
+            if let Some(mut settings) = restore {
+                let zoom = self.ctx.zoom_factor();
+                settings.clamp_size_to_sane_values(largest_monitor_points(zoom, event_loop));
+                settings.clamp_position_to_monitors(zoom, event_loop);
+                viewport.builder = settings.initialize_viewport_builder(zoom, viewport.builder.clone());
+                self.restore = Some(settings);
+            }
             let window = match egui_winit::create_window(&self.ctx, event_loop, &viewport.builder) {
                 Ok(window) => Arc::new(window),
                 Err(error) if id == ViewportId::ROOT => return Err(error.into()),
@@ -261,6 +290,11 @@ impl Shared {
             egui_winit::update_viewport_info(&mut viewport.info, &self.ctx, &window, true);
             let commands = std::mem::take(&mut viewport.deferred_commands);
             egui_winit::process_viewport_commands(&self.ctx, &mut viewport.info, commands, &window, &mut viewport.actions);
+            if id == ViewportId::ROOT
+                && let Some(settings) = self.restore.take()
+            {
+                settings.initialize_window(&window);
+            }
             self.by_window.insert(window.id(), id);
             viewport.window = Some(window);
             viewport.state = Some(state);
@@ -382,6 +416,16 @@ impl Shared {
     }
 }
 
+/// The largest monitor's size in points (16000 a side if there is none), as eframe clamps a
+/// restored window to.
+fn largest_monitor_points(zoom: f32, event_loop: &ActiveEventLoop) -> egui::Vec2 {
+    let largest = event_loop.available_monitors().fold(egui::Vec2::ZERO, |largest, monitor| {
+        let size = monitor.size().to_logical::<f32>(f64::from(zoom) * monitor.scale_factor());
+        largest.max(egui::vec2(size.width, size.height))
+    });
+    if largest == egui::Vec2::ZERO { egui::Vec2::splat(16000.0) } else { largest }
+}
+
 /// An immediate viewport's pass, run inside its parent's: with its window, painted there;
 /// without one yet, run once with no input and painted nothing, and its window opened when the
 /// loop next waits.
@@ -415,11 +459,11 @@ fn run_without_window(ctx: &egui::Context, immediate: ImmediateViewport<'_>) {
     drop(ctx.run_ui(raw, |ui| viewport_ui_cb(ui)));
 }
 
-struct Runner {
+struct Runner<'a> {
     shared: Rc<RefCell<Shared>>,
     /// Made once the main window is up.
-    app: Option<Box<dyn App>>,
-    create: Option<Box<dyn FnOnce(Created) -> Box<dyn App>>>,
+    app: Option<Box<dyn App + 'a>>,
+    create: Option<Box<dyn FnOnce(Created) -> Box<dyn App + 'a> + 'a>>,
     waker: Waker,
     /// When the app last saved.
     saved_at: Instant,
@@ -427,7 +471,7 @@ struct Runner {
     error: Option<RunError>,
 }
 
-impl Runner {
+impl Runner<'_> {
     fn open_pending(&mut self, event_loop: &ActiveEventLoop) {
         let opened = self.shared.borrow_mut().open_pending(event_loop);
         if let Err(error) = opened {
@@ -439,11 +483,12 @@ impl Runner {
         if self.app.is_none()
             && let Some(create) = self.create.take()
         {
-            let (ctx, render_state) = {
+            let (ctx, render_state, window) = {
                 let shared = self.shared.borrow();
-                (shared.ctx.clone(), shared.painter.render_state())
+                let window = shared.viewports.get(&ViewportId::ROOT).and_then(|root| root.window.clone());
+                (shared.ctx.clone(), shared.painter.render_state(), window)
             };
-            self.app = Some(create(Created { ctx, render_state, waker: self.waker.clone() }));
+            self.app = Some(create(Created { ctx, render_state, waker: self.waker.clone(), window }));
         }
     }
 
@@ -477,10 +522,30 @@ impl Runner {
 
     /// The app saves every [`App::auto_save_interval`].
     fn maybe_save(&mut self) {
-        let Some(app) = self.app.as_mut() else { return };
-        if self.saved_at.elapsed() >= app.auto_save_interval() {
-            app.save();
+        let due = self.app.as_ref().is_some_and(|app| self.saved_at.elapsed() >= app.auto_save_interval());
+        if due {
+            self.save();
             self.saved_at = Instant::now();
+        }
+    }
+
+    /// The main window's settings, then the app's save.
+    fn save(&mut self) {
+        let settings = {
+            let mut shared = self.shared.borrow_mut();
+            let zoom = shared.ctx.zoom_factor();
+            let window = shared.viewports.get(&ViewportId::ROOT).and_then(|root| root.window.clone());
+            window.map(|window| {
+                let settings = egui_winit::WindowSettings::from_window(zoom, &window, shared.normal_geometry);
+                shared.normal_geometry = Some(settings.normal_geometry());
+                settings
+            })
+        };
+        if let Some(app) = self.app.as_mut() {
+            if let Some(settings) = settings {
+                app.window_settings(settings);
+            }
+            app.save();
         }
     }
 
@@ -528,7 +593,7 @@ impl Runner {
     }
 }
 
-impl ApplicationHandler<UserEvent> for Runner {
+impl ApplicationHandler<UserEvent> for Runner<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.open_pending(event_loop);
     }
@@ -538,8 +603,7 @@ impl ApplicationHandler<UserEvent> for Runner {
             UserEvent::RunLogicNow => self.run_logic(event_loop),
             UserEvent::Repaint { viewport, when, cumulative_pass_nr } => {
                 let mut shared = self.shared.borrow_mut();
-                // A request from a pass that has since been followed by another is already met.
-                if shared.ctx.cumulative_pass_nr_for(viewport) != cumulative_pass_nr {
+                if !repaint_still_wanted(shared.ctx.cumulative_pass_nr_for(viewport), cumulative_pass_nr) {
                     return;
                 }
                 if let Some(v) = shared.viewports.get_mut(&viewport) {
@@ -619,10 +683,29 @@ impl ApplicationHandler<UserEvent> for Runner {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save();
         if let Some(app) = self.app.as_mut() {
-            app.save();
             app.on_exit();
         }
         self.shared.borrow_mut().painter.destroy();
+    }
+}
+
+/// Whether a repaint asked for during pass `asked_in` still needs a pass, now that `current`
+/// passes have begun. A request made before the pass that is running, or during it (the pass
+/// count moves on as the pass ends, so the request arrives with `current` one ahead), still does:
+/// that is how a control request served in a logic-only pass gets the frame its screenshot waits
+/// for. One from an older pass was met by a later one. This is eframe's rule.
+fn repaint_still_wanted(current: u64, asked_in: u64) -> bool {
+    current == asked_in || asked_in.checked_add(1) == Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_repaint_asked_for_during_the_last_pass_still_paints() {
+        assert!(super::repaint_still_wanted(7, 7), "asked before the running pass ended");
+        assert!(super::repaint_still_wanted(8, 7), "asked during the pass that just ended");
+        assert!(!super::repaint_still_wanted(9, 7), "a later pass already met it");
     }
 }

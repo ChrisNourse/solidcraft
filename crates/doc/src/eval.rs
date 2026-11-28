@@ -11205,11 +11205,22 @@ pub(crate) fn blend_edges_on(
         });
         let moved = moved_since.unwrap_or(false);
         let named = trusted_edge_name(f, i, p);
+        // On the body the pick was made on, a pick on an edge named alike but for its faces' tie
+        // numbers is that edge: the numbers moved, not the edge (#22230). An unchanged box does
+        // not show the body unmoved where an earlier feature places it whole.
+        let unmoved = moved_since == Some(false) && !placed;
         let Some(hit) = named.and_then(|n| crate::name_lookup::locate_projected_edge(mb, n, p).ok()) else {
             // #21997: the saved whole closed edge can now exist as the pieces a whole-turn
             // revolve join's turned seam split it into. Every piece is blended, as a pick made
             // today stores one name per piece.
             let Some(pieces) = named.and_then(|n| crate::name_lookup::recover_split_closed_edge(mb, n, p)) else {
+                // #22418: with the other number, the name can find no edge at all, where only one
+                // of the faces told apart by it meets the edge's other face; the pick then lies on
+                // the edge it is, clear of its ends.
+                if named.filter(|_| unmoved).and_then(|n| crate::name_lookup::retied_edge(mb, &mb.mesh(), n, None, p)).is_some() {
+                    out.push((i, p));
+                    continue;
+                }
                 if let Some(name) = named {
                     let makers = suppressed_edge_makers(doc, f, name);
                     if !makers.is_empty() {
@@ -11228,11 +11239,9 @@ pub(crate) fn blend_edges_on(
             notes.push(format!("the saved edge `{stored}` now exists as {} pieces; every piece is blended", pieces.len()));
             continue;
         };
-        // On the body the pick was made on, a pick off the named edge and on one named alike but for
-        // its faces' tie numbers is that edge: the numbers moved, not the edge (#22230). An
-        // unchanged box does not show the body unmoved where an earlier feature places it whole.
-        let hit = match (hit.on_point, moved_since) {
-            (false, Some(false)) if !placed => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, hit.edge, p)
+        // A pick off the named edge, on one named alike but for its faces' tie numbers (#22230).
+        let hit = match hit.on_point {
+            false if unmoved => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, Some(hit.edge), p)
                 .map_or(hit, |edge| crate::name_lookup::EdgeHit { edge, point: p, verified: false, on_point: true }),
             _ => hit,
         };
@@ -17059,13 +17068,13 @@ fn with_named_face_points(doc: &Document, vals: &BTreeMap<String, Value>, state:
         }
         let from = if k == 0 { placed.unwrap_or(*p) } else { *p };
         let scoped;
-        let input = if let Some(body) = f.kind.thread_target_body(k) {
+        let input = if let Some(body) = f.kind.face_slot_body(k) {
             scoped = ModelState { bodies: fst.bodies.iter().filter(|b| b.name == body).cloned().collect(), ..ModelState::default() };
             &scoped
         } else {
             &fst
         };
-        let body = f.kind.thread_target_body(k).or_else(|| f.kind.face_body());
+        let body = f.kind.face_slot_body(k).or_else(|| f.kind.face_body());
         // Only a thread may find a numbered piece of a round side again as its whole face (#16602).
         let hit = if let FeatureKind::TransformFace { body, .. } = &f.kind {
             crate::name_lookup::locate_owned_face(input, body, n, from)
@@ -20013,6 +20022,8 @@ fn eval_feature_kind(
         | FeatureKind::Stitch { .. }
         | FeatureKind::Thicken { .. }
         | FeatureKind::SurfaceTrim { .. }
+        | FeatureKind::SurfaceFillet { .. }
+        | FeatureKind::SurfaceChamfer { .. }
         | FeatureKind::SurfaceExtend { .. }
         | FeatureKind::SurfaceExtrude { .. }
         | FeatureKind::Unstitch { .. }
@@ -22371,11 +22382,11 @@ pub fn face_point_names(doc: &Document, st: &ModelState, kind: &FeatureKind, com
         }
         return Ok(names);
     }
-    if thread_target_bodies(doc, st, kind)?.is_some() {
+    if matches!(kind, FeatureKind::SurfaceFillet { .. } | FeatureKind::SurfaceChamfer { .. }) || thread_target_bodies(doc, st, kind)?.is_some() {
         let mut names = Vec::with_capacity(pts.len());
         for (slot, point) in pts.iter().enumerate() {
             let scoped;
-            let input = if let Some(body) = kind.thread_target_body(slot) {
+            let input = if let Some(body) = kind.face_slot_body(slot) {
                 scoped = ModelState { bodies: st.bodies.iter().filter(|b| b.name == body).cloned().collect(), ..ModelState::default() };
                 &scoped
             } else {
