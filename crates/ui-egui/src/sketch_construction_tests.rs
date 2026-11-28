@@ -877,3 +877,93 @@ fn perpendicular_click_on_reference_endpoint_places_line() {
     assert!((end - p).x.abs() < 1e-6, "not through a.end: {p:?} {q:?}");
     assert!(d.x.abs() < 1e-6, "not perpendicular to a: {d:?}");
 }
+
+/// The sketch of `sketch()` plus a reference drawn last, `gone` (a line for `line`, else a circle),
+/// the tool `id` started and clicked at each of `picks`, of which `gone` is the last. With `undo`
+/// the Undo button (it runs `edit.undo` and leaves the tool on) then takes `gone` away.
+fn reference_then_undone(id: &str, line: bool, picks: &[[f64; 2]], undo: bool) -> Harness {
+    let mut h = sketch();
+    if line {
+        h.app.run("sketch.line", json!({"points":[[0,30],[20,30]],"ids":["gone"],"infer":false})).unwrap();
+    } else {
+        h.app.run("sketch.circle.center", json!({"center":[40,30],"radius":5,"id":"gone"})).unwrap();
+    }
+    h.settle();
+    crate::sketch_palette::set_mode(&mut h.app, 2);
+    steps(&mut h, id, picks);
+    assert_eq!(h.app.tool.as_ref().and_then(|t| t.picks.last()).map(String::as_str), Some("gone"), "{id}: `gone` is picked");
+    if undo {
+        h.app.run("edit.undo", json!({})).unwrap();
+        h.settle();
+        let sid = h.app.session.active_sketch.unwrap();
+        assert!(h.app.session.doc.sketch(sid).unwrap().curve_index("gone").is_none(), "{id}: Undo took `gone`");
+    }
+    h
+}
+
+/// The construction line tools no longer keep a reference whose curve the Undo button took away
+/// (#23702): it is dropped, so a new reference and the clicks after it make one construction line
+/// and say nothing wrong.
+#[test]
+fn a_construction_line_whose_reference_was_undone_takes_a_new_one() {
+    let cases: &[(&str, bool, &[[f64; 2]], &[[f64; 2]])] = &[
+        ("sketch.construction_line.parallel", true, &[[10., 30.]], &[[10., 0.], [5., 10.]]),
+        ("sketch.construction_line.perpendicular", true, &[[10., 30.]], &[[10., 0.], [5., 10.]]),
+        ("sketch.construction_line.tangent_external", false, &[[40., 35.]], &[[40., 5.], [50., 10.], [50., 15.]]),
+        ("sketch.construction_line.tangent_at", false, &[[40., 35.]], &[[40., 5.], [45., 0.]]),
+        ("sketch.construction_line.tangent_two", false, &[[40., 5.], [40., 35.]], &[[60., 5.], [50., 8.]]),
+        ("sketch.construction_line.bisector", true, &[[10., 0.], [10., 30.]], &[[0., 10.], [10., 10.]]),
+    ];
+    let mut failed = Vec::new();
+    for (id, line, picks, after) in cases {
+        let mut h = reference_then_undone(id, *line, picks, true);
+        let sid = h.app.session.active_sketch.unwrap();
+        let before = h.app.session.doc.sketch(sid).unwrap().curves.len();
+        for q in *after {
+            h.step(&json!({"click":{"sketch":q}})).unwrap();
+        }
+        let made = h.app.session.doc.sketch(sid).unwrap().curves.len().saturating_sub(before);
+        let error = h.app.status.as_ref().filter(|s| s.2).map(|s| s.0.clone());
+        if error.is_some() || made != 1 {
+            failed.push(format!("{id}: {made} made, {error:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Without the Undo the Parallel construction line keeps its reference, so each click makes a line
+/// parallel to it, as before #23702.
+#[test]
+fn a_parallel_construction_line_keeps_a_reference_that_stands() {
+    let mut h = reference_then_undone("sketch.construction_line.parallel", true, &[[10., 30.]], false);
+    let sid = h.app.session.active_sketch.unwrap();
+    let before = h.app.session.doc.sketch(sid).unwrap().curves.len();
+    h.step(&json!({"click":{"sketch":[10., 0.]}})).unwrap();
+    h.step(&json!({"click":{"sketch":[5., 10.]}})).unwrap();
+    assert!(!h.app.status.as_ref().is_some_and(|s| s.2), "{:?}", h.app.status);
+    assert_eq!(h.app.session.doc.sketch(sid).unwrap().curves.len(), before + 2);
+    assert_eq!(h.app.tool.as_ref().map(|t| t.picks.clone()), Some(vec!["gone".to_string()]));
+}
+
+/// A right-click still ends the Parallel construction line after the Undo button took its
+/// reference away.
+#[test]
+fn a_parallel_construction_line_whose_reference_was_undone_ends_on_a_right_click() {
+    let mut h = reference_then_undone("sketch.construction_line.parallel", true, &[[10., 30.]], true);
+    h.step(&json!({"click":{"sketch":[5., 10.]}})).unwrap();
+    assert_eq!(h.app.tool.as_ref().map(|t| t.picks.len()), Some(0), "the lost reference is dropped");
+    h.step(&json!({"click":{"sketch":[5., 10.]},"button":"right"})).unwrap();
+    assert!(h.app.tool.is_none(), "the right-click ends the tool");
+}
+
+/// A segment's start is placed against the reference, so it goes with a lost one (#23702).
+#[test]
+fn a_segment_start_goes_with_a_reference_that_was_undone() {
+    let h = reference_then_undone("sketch.construction_line.parallel", true, &[[10., 30.]], true);
+    let mut tool = crate::sketch_tools::tool_for("sketch.construction_line.parallel").unwrap();
+    tool.picks = vec!["gone".into()];
+    tool.pts = vec![(solidcore_record::Vec2::new(5.0, 10.0), None)];
+    assert!(crate::sketch_tools::drop_gone_picks(&h.app, &mut tool));
+    assert!(tool.picks.is_empty() && tool.pts.is_empty(), "{:?} {:?}", tool.picks, tool.pts);
+    assert!(!tool.picks_dropped, "a right-click still ends the tool");
+}
