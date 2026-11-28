@@ -3,7 +3,7 @@
 //! `surface_offset`, `surface_ruled`, `surface_untrim`).
 
 use super::*;
-use crate::{RuledCorners, RuledMode, SheetSection};
+use crate::{FaceAt, FilletTrim, RuledCorners, RuledMode, SheetSection};
 use solidcore_record::Seg2;
 
 pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState, warning: &mut Option<String>) -> Result<()> {
@@ -84,6 +84,23 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 return Err(DocError::Invalid("pick the surfaces to thicken".into()));
             }
             apply_traced(doc, st, f, tools, *operation, &crate::plain(targets))
+        }
+        FeatureKind::SurfaceFillet { a, b, radius, trim, extend } => {
+            let r = val(vals, radius, Kind::Length)?;
+            if !(r.is_finite() && r > 0.0) {
+                return Err(DocError::Invalid("Surface Fillet: the radius must be positive".into()));
+            }
+            // As Fillet builds it, so the round's face is named after the two faces it replaces.
+            let round = |body: &kernel::Body, seams: &[Vec3]| Ok(kernel::fillet_removing(body, seams, r, kernel::FilletTurn::Mitre)?.0);
+            round_seam(st, f, [a, b], *trim, *extend, &round)
+        }
+        FeatureKind::SurfaceChamfer { a, b, distance, distance2, angle, flip, trim, extend } => {
+            let d = val(vals, distance, Kind::Length)?;
+            if !(d.is_finite() && d > 0.0) {
+                return Err(DocError::Invalid("Surface Chamfer: the distance must be positive".into()));
+            }
+            let bevel = |body: &kernel::Body, seams: &[Vec3]| super::chamfer_with(vals, body, seams, d, distance2, angle, *flip);
+            round_seam(st, f, [a, b], *trim, *extend, &bevel)
         }
         FeatureKind::SurfaceTrim { body, plane, tool, tool_body, keep, keep_more, curves, with, keep_with, stitch, extend } => {
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
@@ -336,6 +353,105 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
+        FeatureKind::SurfaceMorph {
+            body,
+            faces,
+            base,
+            base_face,
+            control,
+            control_face,
+            projection,
+            map_mode,
+            scale,
+            tolerance,
+            flip_u,
+            flip_v,
+            swap_uv,
+            keep_original,
+        } => {
+            let scale_val = val(vals, scale, Kind::Unitless)?;
+            let tol = val(vals, tolerance, Kind::Length)?;
+            let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let Some(mb) = st.bodies.get(i).cloned() else {
+                return Err(DocError::Invalid("body".into()));
+            };
+            let base_mb = st.body(base).cloned().ok_or_else(|| DocError::Unknown(format!("body `{base}`")))?;
+            let control_mb = st.body(control).cloned().ok_or_else(|| DocError::Unknown(format!("body `{control}`")))?;
+
+            // Resolve face picks in each operand's own frame before moving into a common frame.
+            let mut picked_faces: Vec<usize> = Vec::new();
+            for p in faces {
+                let fi =
+                    crate::appearance::face_index_at(&mb, p.0).ok_or_else(|| DocError::Invalid(format!("Morph: no face of {body} at {}", p.0)))?;
+                if !picked_faces.contains(&fi) {
+                    picked_faces.push(fi);
+                }
+            }
+
+            let base_fi = match base_face {
+                Some(p) => crate::appearance::face_index_at(&base_mb, p.0)
+                    .ok_or_else(|| DocError::Invalid(format!("Morph: no face of {base} at {}", p.0)))?,
+                None => 0,
+            };
+            let control_fi = match control_face {
+                Some(p) => crate::appearance::face_index_at(&control_mb, p.0)
+                    .ok_or_else(|| DocError::Invalid(format!("Morph: no face of {control} at {}", p.0)))?,
+                None => 0,
+            };
+
+            // Bring target, base, and control into the destination body's frame so offsets and
+            // component placements on any operand are respected and Keep Original keeps placement.
+            let body_world = |b: &ModelBody| -> crate::Mat {
+                let m = doc.component_transform(doc.model_body_component(b));
+                doc.model_body_offset(b).map(|o| crate::mat_mul(&m, o)).unwrap_or(m)
+            };
+            let dest_world = if *keep_original { doc.component_transform(f.component) } else { body_world(&mb) };
+            let inv_dest =
+                crate::mat_inverse(&dest_world).ok_or_else(|| DocError::Invalid("Morph: destination placement cannot be inverted".into()))?;
+            let in_dest = |b: &ModelBody| -> Result<kernel::Body> {
+                let bw = body_world(b);
+                if bw == dest_world {
+                    return Ok(b.body.clone());
+                }
+                let rel = crate::mat_mul(&inv_dest, &bw);
+                if crate::is_identity(&rel) {
+                    Ok(b.body.clone())
+                } else {
+                    st.body_in_frame(b, &rel)
+                        .map(|moved| moved.body)
+                        .map_err(|e| DocError::Invalid(format!("Morph: body `{}` cannot be moved into frame: {e}", b.name)))
+                }
+            };
+            let target_body = in_dest(&mb)?;
+            let base_body = in_dest(&base_mb)?;
+            let control_body = in_dest(&control_mb)?;
+
+            let opts = kernel::services::morph::MorphOptions {
+                projection: match *projection {
+                    crate::MorphProjection::Normal => kernel::services::morph::MorphProjection::Normal,
+                    crate::MorphProjection::Direction { dir } => kernel::services::morph::MorphProjection::Direction(dir),
+                },
+                map_mode: match *map_mode {
+                    crate::MorphMapMode::NormalToNormal => kernel::services::morph::MorphMapMode::NormalToNormal,
+                    crate::MorphMapMode::Translate => kernel::services::morph::MorphMapMode::Translate,
+                },
+                scale: scale_val,
+                flip_u: *flip_u,
+                flip_v: *flip_v,
+                swap_uv: *swap_uv,
+                tolerance: tol,
+                faces: if picked_faces.is_empty() { None } else { Some(picked_faces) },
+            };
+            let morphed = kernel::morph_surface(&target_body, &base_body, base_fi, &control_body, control_fi, &opts)?;
+
+            if *keep_original {
+                let name = new_name(st, f, 0);
+                st.bodies.push(ModelBody { sheet: mb.sheet, ..ModelBody::new(name, morphed, f.id) });
+            } else if let Some(slot) = st.bodies.get_mut(i) {
+                *slot = ModelBody { sheet: mb.sheet, component: mb.component, ..ModelBody::new(mb.name, morphed, mb.feature) };
+            }
+            Ok(())
+        }
         FeatureKind::SurfaceExtrude { sketch, profiles, curves, extent, to_next } => {
             let ss = constructor_profile_in_frame(
                 doc,
@@ -344,6 +460,9 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             )?;
             if extent.through_all || extent.through_all2 || extent.to2.is_some() || extent.from.is_some() || extent.symmetric_offset {
                 return Err(DocError::Invalid("not supported yet: a surface extrude through all, from an object, or with symmetric offset".into()));
+            }
+            if extent.taper2.is_some() {
+                return Err(DocError::Invalid("not supported yet: a second taper (`taper2`) on a surface extrude".into()));
             }
             if *to_next && extent.to.is_some() {
                 return Err(DocError::Invalid("a surface extrude goes To Next or To Object, not both".into()));
@@ -539,19 +658,53 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         FeatureKind::SurfaceLoft { sections, continuity, crown, rails, rail_fit, faced, stays_surface } => {
             use kernel::Continuity::{G0, G1};
             let in_space = sections.iter().any(|s| section_in_space(st, s));
-            let planar = !in_space && sections.iter().all(|s| s.body.is_none());
+            let sketch_only = sections.iter().all(|s| s.body.is_none());
+            let planar = !in_space && sketch_only;
             let plain = planar && *continuity == [G0, G0];
+            let space_railed = in_space && sketch_only && *continuity == [G0, G0] && !rails.is_empty();
             let tangent_end = match *continuity {
                 [G1, G0] if planar && sections.len() == 2 => Some((0, crown[0])),
                 [G0, G1] if planar && sections.len() == 2 => Some((1, crown[1])),
                 _ => None,
             };
-            if !plain && !rails.is_empty() {
-                return Err(DocError::Invalid(if in_space {
-                    "not supported yet: guide rails on a loft through 3D sketch curves".into()
+            if !plain && !space_railed && !rails.is_empty() {
+                return Err(DocError::Invalid("not supported yet: guide rails on a loft with edge sections or end continuity".into()));
+            }
+            if space_railed {
+                let mut secs = Vec::with_capacity(sections.len());
+                for sec in sections {
+                    let raw = loft_section_sketch(st, sec)?;
+                    if section_in_space(st, sec) {
+                        if sec.profiles.is_some() {
+                            return Err(loft_section_chain_error());
+                        }
+                        let mapped = path_in_frame(doc, raw, f.component)?;
+                        let path = path_points(&curves_in(mapped.as_ref(), &sec.curves), Vec3::new(f64::NAN, f64::NAN, f64::NAN))?
+                            .ok_or_else(loft_section_chain_error)?;
+                        secs.push(kernel::SpaceLoftSection::Space(path));
+                    } else {
+                        let (ss, chain) = planar_loft_section(doc, raw, f, sec)?;
+                        secs.push(kernel::SpaceLoftSection::Planar { plane: ss.plane, segs: chain });
+                    }
+                }
+                let start = secs
+                    .first()
+                    .and_then(|s| match s {
+                        kernel::SpaceLoftSection::Planar { plane, segs } => segs.first().map(|seg| plane.to_world(seg.start())),
+                        kernel::SpaceLoftSection::Space(path) => path.points().first().copied(),
+                    })
+                    .unwrap_or_default();
+                let rails = crate::eval::rail_polylines(doc, st, rails, f.component, start)?;
+                let fit = crate::eval::kernel_rail_fit(*rail_fit);
+                let body = if *faced {
+                    kernel::loft_sheet_space_with_rails(&secs, &rails, fit)?
                 } else {
-                    "not supported yet: guide rails on a loft with edge sections or end continuity".into()
-                }));
+                    kernel::loft_sheet_space_with_rails_legacy_sides(&secs, &rails, fit)?
+                };
+                let name = new_name(st, f, 0);
+                st.bodies.push(ModelBody::new(name, body, f.id));
+                stays_a_surface(st, *stays_surface);
+                return Ok(());
             }
             if !plain && tangent_end.is_none() {
                 loft_blend(st, f, sections, *continuity, *crown, doc)?;
@@ -1075,6 +1228,86 @@ fn boundary_frames(
         out.push(Boundary { frames, order: orders.get(side).copied().unwrap_or(solidcraft_kernel::Continuity::G1) });
     }
     Ok(out)
+}
+
+/// Surface Fillet and Surface Chamfer: the two surfaces of `a` and `b` cut each other (each keeping
+/// the side its point is on) and sewn into one body, the seam between them rounded or bevelled by
+/// `round`. With `trim` both, the
+/// result takes the place of `a`'s body and `b`'s is gone. With `first`, `a`'s body is the cut-back
+/// `a` sewn to the round and `b`'s is as it was; with `none`, both are as they were and the round
+/// alone is a new surface body.
+fn round_seam(
+    st: &mut ModelState,
+    f: &Feature,
+    [a, b]: [&FaceAt; 2],
+    trim: FilletTrim,
+    extend: bool,
+    round: &dyn Fn(&kernel::Body, &[Vec3]) -> Result<kernel::Body>,
+) -> Result<()> {
+    let i = st.bodies.iter().position(|x| x.name == a.body.0).ok_or_else(|| DocError::Unknown(format!("body `{}`", a.body)))?;
+    let before = (trim != FilletTrim::Both).then(|| st.clone());
+    mutual_trim(st, i, &b.body.0, kernel::TrimKeep::Side(a.point.0), &[b.point.0], true, extend)?;
+    // The second body is gone now, so the sewn one may have moved down: find it again by its name.
+    let sewn_at = st.bodies.iter().position(|x| x.name == a.body.0).ok_or_else(|| DocError::Invalid("the sewn body is missing".into()))?;
+    let Some(sewn) = st.bodies.get(sewn_at).cloned() else { return Err(DocError::Invalid("body".into())) };
+    // Each surface is one face and they are sewn along their seam: the edges two different faces
+    // share (not a periodic face's own seam, which has two uses on one face).
+    let seams: Vec<usize> = sewn
+        .body
+        .record()
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e.uses.as_slice(), [u, v] if u.face != v.face))
+        .map(|(k, _)| k)
+        .collect();
+    if seams.is_empty() {
+        return Err(DocError::Invalid("Surface Fillet and Chamfer: the two surfaces don't meet along an edge".into()));
+    }
+    // One seam is blended at a time: surfaces that meet along more than one edge would leave more
+    // than one round, which `first` and `none` cannot split back into two surfaces and a round, so
+    // every trim refuses them alike, before any of them does its own work.
+    if seams.len() > 1 {
+        return Err(DocError::Invalid(
+            "Surface Fillet and Chamfer: a blend with more than one seam is not supported yet: pick surfaces that meet along one edge".into(),
+        ));
+    }
+    let mut picks = Vec::with_capacity(seams.len());
+    for k in seams {
+        let Some(p) = kernel::edge_middle(&sewn.body, k)? else {
+            return Err(DocError::Invalid("Surface Fillet and Chamfer: a seam has no middle".into()));
+        };
+        picks.push(p);
+    }
+    let rounded = round(&sewn.body, &picks)?;
+    // The round blends an edge this feature made (the seam), so the sewn body is a stage of the
+    // feature: its faces and edges are named first, and the round is named after the faces beside it.
+    let rounded = sewn.traced().then(rounded.with_preserved_planar_sources(&sewn.body)?);
+    let Some(before) = before else {
+        // Every trim refuses a point nearer the round than its own surface (`first` and `none`
+        // through `rounded_parts` below), before anything is written.
+        kernel::check_round_picks(&rounded.body, a.point.0, b.point.0)?;
+        if let Some(slot) = st.bodies.get_mut(sewn_at) {
+            *slot = ModelBody::traced_new(sewn.name, rounded, sewn.feature);
+        }
+        return Ok(());
+    };
+    // `first` and `none`: the pieces of the result, put back on the model as it was.
+    let [piece_a, _piece_b, round] = kernel::rounded_parts(&rounded.body, a.point.0, b.point.0)?;
+    let (piece_a, round) = (rounded.then(piece_a), rounded.then(round));
+    *st = before;
+    if trim == FilletTrim::First {
+        let sewn = kernel::stitch(&[&piece_a.body, &round.body], 0.0)?;
+        let sewn = Traced::step(sewn, &[&piece_a, &round]);
+        let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+        if let Some(slot) = st.bodies.get_mut(i) {
+            *slot = ModelBody::traced_new(mb.name, sewn, mb.feature);
+        }
+    } else {
+        let name = new_name(st, f, 0);
+        st.bodies.push(ModelBody::traced_new(name, round, f.id));
+    }
+    Ok(())
 }
 
 /// Mutual Trim: the body at `i` and `other` trimmed by each other (each keeping its picks), the

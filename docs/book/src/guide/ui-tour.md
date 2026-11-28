@@ -21,7 +21,9 @@ view.
   design that has features. Double-click a design's tab, or right-click it and choose **Rename**, to
   rename the design: type the name, then press Enter or click elsewhere to keep it, or Esc to leave
   the old one (Preferences › Interface turns the double-click off, for a double-click that maximizes
-  the window instead; **Rename** stays in the menu). **Duplicate** in a design tab's right-click menu
+  the window instead; **Rename** stays in the menu). Double-click a view's sub-tab (Model, Sketch 1…)
+  to rename that view the same way; the same preference turns that off, and the view's **Rename
+  view** row and F2 still work. **Duplicate** in a design tab's right-click menu
   opens a copy of the design in a new tab next to it, named "… copy" and not saved yet. **Save**
   and **Save As…** in the same menu save that tab's design (it is shown first), as the File menu's
   do. With a design's views shown as tabs inside its tab, the chevron right after its + folds them
@@ -82,6 +84,9 @@ view.
   with Select Other** in Preferences › Sketch & selection to restore the original visible-only
   list under the pointer. Picking a hidden object leaves its
   visibility unchanged, so an Extrude profile can be chosen through a covering body.
+  Hold over a closed cavity to list the faces the pointer crosses inside the solid, nearest first
+  within that body. Hover a face row to see its shape through the wall. With Extrude open, click
+  the row for a flat end of the cavity to use it as the profile.
   The sketch being edited comes first. Hovering a row lights it up; clicking it
   selects it (Shift or Ctrl adds), and in a command's dialog it goes to the active selection box.
   Esc or a click elsewhere closes the list. Clicking again on the same spot, with nothing changed
