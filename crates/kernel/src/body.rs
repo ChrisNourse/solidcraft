@@ -222,6 +222,10 @@ pub struct Body {
     /// The exact box ([`Body::exact_bounds`]), measured on first use and shared by clones
     /// because they share the record.
     pub(crate) bounds: std::sync::Arc<std::sync::Mutex<Option<Aabb3>>>,
+    /// The exact area of each face ([`Body::face_area`]) once measured, by face index (`None`:
+    /// not measured yet), shared by clones because they share the record and by rigidly moved
+    /// copies because a rigid motion keeps every face's area (#23681).
+    pub(crate) face_areas: std::sync::Arc<std::sync::Mutex<Vec<Option<f64>>>>,
     /// Set for mesh bodies (`record` is then empty).
     pub(crate) mesh: Option<std::sync::Arc<crate::meshbody::TriMesh>>,
     /// Display colour (linear RGB 0..1) from an imported file; operations drop it.
@@ -813,6 +817,7 @@ impl Body {
             volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
             mass: std::sync::Arc::new(std::sync::Mutex::new(None)),
             bounds: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            face_areas: std::sync::Arc::default(),
             mesh,
             color: None,
             paint: None,
@@ -1669,11 +1674,13 @@ impl Body {
             smlib: std::sync::Arc::default(),
             ops: std::sync::Arc::default(),
             outline: std::sync::Arc::default(),
-            // A rigid motion keeps the size and the volume; the centroid and exact bounds move.
+            // A rigid motion keeps the size, the volume and the face areas; the centroid and
+            // exact bounds move.
             size: self.size,
             volume: self.volume.clone(),
             mass: std::sync::Arc::new(std::sync::Mutex::new(None)),
             bounds: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            face_areas: self.face_areas.clone(),
             mesh: None,
             color: self.color,
             paint: self.paint.clone(),
@@ -2416,21 +2423,49 @@ impl Body {
     /// The area of face `face_index` from its exact surface and trim (#22556): solidcore's
     /// boundary integral ([`solidcore_ops::Body::face_area`]), the measure the whole body's area
     /// uses, at [`FACE_AREA_ACCURACY`]; no mesh. `None` for a mesh body or an index out of range.
+    /// Measured once per record and kept (#23681): List Faces asks for every face's area again
+    /// on each call, and the integral costs far more than reading it back. A failure is not
+    /// kept, so the next call measures again.
     ///
     /// # Errors
     ///
     /// [`KernelError::Failed`] for the kernel's failure (a face it cannot integrate).
     pub fn face_area(&self, face_index: usize) -> Result<Option<f64>> {
+        if let Some(area) = self.kept_face_area(face_index) {
+            return Ok(Some(area));
+        }
         let Some(form) = self.ops_body() else { return Ok(None) };
         let (body, order) = &*form;
         if face_index >= self.record.faces.len() {
             return Ok(None);
         }
-        guard("face area", || match body.face_area(order, face_index, FACE_AREA_ACCURACY) {
+        let area = guard("face area", || match body.face_area(order, face_index, FACE_AREA_ACCURACY) {
             Ok(a) => Ok(Some(a)),
             Err(solidcore_ops::Error::Argument) => Ok(None),
             Err(e) => Err(KernelError::Failed(format!("face area: {e}"))),
-        })
+        })?;
+        if let Some(a) = area
+            && let Ok(mut kept) = self.face_areas.lock()
+        {
+            if kept.len() <= face_index {
+                kept.resize(face_index + 1, None);
+            }
+            if let Some(slot) = kept.get_mut(face_index) {
+                *slot = Some(a);
+            }
+        }
+        Ok(area)
+    }
+
+    /// The exact area of face `face_index` that [`Body::face_area`] measured and kept, if it did.
+    fn kept_face_area(&self, face_index: usize) -> Option<f64> {
+        self.face_areas.lock().ok().and_then(|kept| kept.get(face_index).copied().flatten())
+    }
+
+    /// Whether [`Body::face_area`] has kept face `face_index`'s exact area (tests).
+    #[doc(hidden)]
+    pub fn has_kept_face_area(&self, face_index: usize) -> bool {
+        self.kept_face_area(face_index).is_some()
     }
 
     /// The unit normal of face `face_index` at `point`, a point of that face (within the body's
