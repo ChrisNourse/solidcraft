@@ -2259,6 +2259,39 @@ fn a_loft_of_two_squares_has_planar_sides() {
     assert!(rel(b.volume(1e-8).unwrap(), 7000.0 / 3.0) < 1e-9);
 }
 
+/// The flanged sections of #11759, on the planes x = `X`, half as wide as `W` and 4.8 high: a
+/// line along the bottom and up the right, a quadratic Bézier over the top through (0, 3.4),
+/// and a line down the left. The skin's chord-length parameters across them follow the jump
+/// from 32 to 50.8 wide, so the control points of every line straight along x (the top's
+/// middle, the lines' middles) go 0, ~9, ~5, 12.6: the net turns back on itself by 180°
+/// inside a face, though x grows all the way along the loft, and SMLib's check refused it
+/// (`Bad NonMonotonic CPts`). The net refined across the sections no longer turns back.
+#[test]
+fn a_loft_whose_net_turns_back_across_uneven_sections_is_valid() {
+    const X: [f64; 4] = [0.0, 6.182971801232, 9.715335, 12.617678882943];
+    const W: [f64; 4] = [12.354, 16.0, 25.4, 25.4];
+    rig_fixes();
+    let section = |x: f64, w: f64| {
+        let p = |y: f64, z: f64| [x, y, z];
+        vec![
+            line(p(-w, -2.4), p(w, -2.4)),
+            line(p(w, -2.4), p(w, 2.4)),
+            Curve::Nurbs {
+                degree: 2,
+                points: [p(w, 2.4), p(0.0, 3.4), p(-w, 2.4)]
+                    .map(|[x, y, z]| [x, y, z, 1.0])
+                    .to_vec(),
+                knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            },
+            line(p(-w, 2.4), p(-w, -2.4)),
+        ]
+    };
+    let sections: Vec<Vec<Curve>> = X.iter().zip(W).map(|(&x, w)| section(x, w)).collect();
+    let b = loft(&sections, 3, true).unwrap();
+    let report = b.check(CheckLevel::All).unwrap();
+    assert!(report.is_valid(), "{}", report.text);
+}
+
 /// The profile of #22184 placed by `p`: a cubic Bézier from (-30, -20) to (30, 15) through
 /// the controls (-10, 20) and its last 0.05 mm from its end at 225 degrees (`leg`; the
 /// issue's ordinary profile has (18, 12)), then two lines back.
