@@ -846,6 +846,31 @@ mod tests {
         );
     }
 
+    /// #18204: a round beside a 0.8 mm chamfer on the neighbouring top edge, with a radius 1.5e-5 to
+    /// 2.5e-5 mm over the chamfer's size, is built like the radii just under and just over that
+    /// band; it failed with "Unable to map new Fillet Edge back to Edge in Target Brep". The
+    /// round takes QUARTER r^2 off per mm of its edge, which the chamfer ends between x = 32.2 (at
+    /// the top) and x = 33 (at the chamfer's foot).
+    #[test]
+    fn a_round_a_hair_larger_than_the_chamfer_beside_it_is_built() {
+        let b = box_solid(Vec3::new(0.0, -4.15, 0.0), Vec3::new(33.0, 4.15, 9.7)).unwrap();
+        let c = imp::blend(&b, "chamfer", Kind::Chamfer, &[Vec3::new(33.0, 0.0, 9.7)], &[0.8]).unwrap();
+        let chamfered = 33.0 * 8.3 * 9.7 - 0.32 * 8.3;
+        assert!(near(volume(&c), chamfered), "{}", volume(&c));
+        for g in [1.3e-5, 1.5e-5, 1.8e-5, 2.0e-5, 2.5e-5, 3.0e-5] {
+            let radius = 0.8 + g;
+            let r = imp::blend(&c, "fillet", Kind::Round(FilletTurn::Mitre), &[Vec3::new(16.5, 4.15, 9.7)], &[radius]);
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => panic!("g {g}: {e}"),
+            };
+            let section = QUARTER * radius * radius;
+            let v = volume(&r);
+            assert!(v < chamfered - section * 32.2 + 1e-3 && v > chamfered - section * 33.0 - 1e-3, "g {g}: {v}");
+            assert!(matches!(crate::validity(&r).smlib, Some(crate::SmlibCheck::Valid)), "g {g}");
+        }
+    }
+
     #[test]
     fn options_smlib_cannot_build_are_refused() {
         assert!(unsupported("x").to_string().contains("not supported yet"));

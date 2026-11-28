@@ -152,6 +152,7 @@ use crate::nurbs::b_spline_surface::p1::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use crate::nurbs::knots::Side;
 use crate::query::brep::BrepFaceServices;
+use crate::surface::surface::p1::map_to_2d_dir;
 use crate::surface::surface::p2::B_SPLINE_SURFACE_TYPE;
 use crate::surface::surface::p4::NoObject;
 use crate::surface::surface::p7::drop_vectors_at;
@@ -465,11 +466,18 @@ impl<M: TrimOriginalSurfacesMarks> FaceTraversalMarks for TrimTraversalMarks<'_,
 /// chain of `side_eus` edges that leads from `start_fv` to `end_fv`, each with its UV
 /// trim curve (`GetUVTrimCurve`: the use's or its mate's) and its orientation along
 /// the chain. When every UV curve of the lists is present the chain is tested in UV
-/// space: a side edge whose UV start is more than `uv_tol` from the chain's end is
-/// skipped beyond `20 * uv_tol`, or when the fillet surface puts the two points more
-/// than ten times the solver's tolerance apart. Returns `rbMadeConnection`: whether
-/// the chain reached `end_fv`. `g` is the fillet geometry (`fb`'s), `solvers` resolves
-/// its solver.
+/// space: a side edge whose UV start is more than the UV tolerance from the chain's end
+/// is skipped beyond 20 times that tolerance, or when the fillet surface puts the two
+/// points more than ten times the solver's tolerance apart. Returns `rbMadeConnection`:
+/// whether the chain reached `end_fv`. `g` is the fillet geometry (`fb`'s), `solvers`
+/// resolves its solver.
+///
+/// `uv_tol` is the caller's 3D tolerance mapped to the fillet surface's parameters along
+/// u, at the middle of the surface. A gap is tested against that tolerance turned to the
+/// gap's own direction ([`uv_tol_towards`]; not upstream, #18204: upstream tests every gap
+/// against `uv_tol`, so a gap across the round, where a parameter step covers far less
+/// length than along it, was skipped as too large while inside the tolerance in 3D). A
+/// gap along u, and any gap of a geometry without fillet surface, has `uv_tol` itself.
 ///
 /// # Errors
 ///
@@ -504,6 +512,26 @@ pub fn join_two_fillet_verts_by_curves(
         curve_orients,
         &|id, op| solver_of(solvers, id, op),
     )
+}
+
+/// (Not upstream; #18204) `uv_tol`, a 3D tolerance mapped to `surface`'s parameters along
+/// u at the middle of its domain (`SmTol::MapTo2d` with the direction (1, 0)), as the same
+/// 3D tolerance maps there in the UV direction `dir`: the mapping is linear in the
+/// tolerance, so the two differ by the ratio of the mapped unit lengths. `uv_tol` itself
+/// along u, and for a surface whose unit length maps to nothing along u.
+///
+/// # Errors
+///
+/// Those of [`map_to_2d_dir`] and of the surface's domain.
+fn uv_tol_towards(k: &Kernel, surface: &Surface, uv_tol: f64, dir: Vec2) -> Result<f64> {
+    let mid = surface.natural_uv_domain_with_nurb(k)?.mid();
+    let along_u = map_to_2d_dir(k, 1.0, mid, Vec2::new(1.0, 0.0), surface)?;
+    if along_u > 0.0 && along_u.is_finite() {
+        let towards = map_to_2d_dir(k, 1.0, mid, dir, surface)?;
+        Ok(uv_tol * (towards / along_u))
+    } else {
+        Ok(uv_tol)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,9 +630,19 @@ pub(super) fn join_two_fillet_verts_by_curves_resolved<'s>(
                 let start_pnt = side_uv.evaluate_point(k, start_param)?;
                 let uv_dist = start_pnt.distance(end_pnt);
 
-                if uv_dist > uv_tol {
+                // (not upstream; #18204) `uv_tol` is the tolerance of a gap along u;
+                // the tolerance of this gap is the one in its own direction
+                let gap_tol = match fillet_surface {
+                    Some(surface) => {
+                        let gap = Vec2::new(start_pnt.x - end_pnt.x, start_pnt.y - end_pnt.y);
+                        uv_tol_towards(k, surface, uv_tol, gap)?
+                    }
+                    None => uv_tol,
+                };
+
+                if uv_dist > gap_tol {
                     // skip curves with large gaps
-                    if uv_dist > 20.0 * uv_tol {
+                    if uv_dist > 20.0 * gap_tol {
                         ii += 1;
                         continue; // Too much of a gap
                     }
