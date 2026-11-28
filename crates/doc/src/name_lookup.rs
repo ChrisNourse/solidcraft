@@ -1876,15 +1876,11 @@ fn split_face_pieces(st: &ModelState, name: &str) -> Option<(usize, Vec<usize>)>
 /// copy keeps the pick where the seed's cut has since taken the face away (#23612).
 pub(crate) fn nearest_split_face_piece(st: &ModelState, name: &str, p: Vec3) -> Option<(usize, usize)> {
     let (bi, pieces) = split_face_pieces(st, name)?;
-    let mesh = st.bodies.get(bi)?.mesh();
-    mesh.triangles
-        .iter()
-        .zip(&mesh.tri_face)
-        .filter(|(_, f)| pieces.contains(&(**f as usize)))
-        .filter_map(|(tri, f)| {
-            let [a, b, c] = mesh.tri(tri)?;
-            Some((crate::appearance::closest_on_triangle(p, a, b, c).dist(p), *f as usize))
-        })
+    let b = st.bodies.get(bi)?;
+    pieces
+        .into_iter()
+        // On the exact face as trimmed; a piece the solve gives nothing for is passed over.
+        .filter_map(|f| b.body.closest_to_point(&[f], &[], p.into()).ok().flatten().map(|c| (c.distance, f)))
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, f)| (bi, f))
 }
