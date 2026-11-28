@@ -1,4 +1,5 @@
 //! Saved weld graphics: manufacturing settings and optional symbols, never features or bodies.
+use crate::weld_tolerance::{Band, Deviation, Family, Joint, Level, Sizes, tolerance};
 use serde::{Deserialize, Serialize};
 use solidcraft_geom::weld::{MAX_DIMENSION_MM, MIN_DIMENSION_MM, Weld};
 use std::collections::{BTreeMap, BTreeSet};
@@ -122,6 +123,11 @@ pub struct WeldSettings {
     pub reference_plane: String,
     pub density: Option<f64>,
     pub overlap: Option<f64>,
+    /// The user's own silent bands by deviation key (`weld_tolerance::Deviation::key`), mm or
+    /// degrees; empty = the standards' values. Left out of the file when empty, so files without
+    /// it read as before.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tolerances: BTreeMap<String, f64>,
     /// ISO 6947 position, one of [`POSITIONS`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
@@ -175,6 +181,7 @@ impl Default for WeldSettings {
             reference_plane: "sketch".into(),
             density: None,
             overlap: None,
+            tolerances: BTreeMap::new(),
             position: None,
             quality: None,
             wps: None,
@@ -332,7 +339,21 @@ impl WeldSettings {
         if [self.density, self.overlap].into_iter().flatten().any(|v| !dimension(v)) {
             return Err("density and overlap must be finite and between 1e-6 and 100000".into());
         }
+        if self
+            .tolerances
+            .iter()
+            .any(|(k, v)| !Deviation::ALL.iter().any(|d| d.key() == k) || !v.is_finite() || !(0.0..=MAX_DIMENSION_MM).contains(v))
+        {
+            return Err("tolerances need known deviation keys and finite values between 0 and 100000".into());
+        }
         Ok(())
+    }
+
+    /// The tolerance band for `deviation` at a `joint` of these `sizes` in this weld's standard,
+    /// with the user's own silent band where set (Q135, Q190).
+    pub fn tolerance(&self, joint: Joint, deviation: Deviation, sizes: Sizes, level: Level) -> Option<Band> {
+        tolerance(Family::of(&self.symbol_standard), joint, deviation, sizes, level)
+            .map(|b| b.with_override(self.tolerances.get(deviation.key()).copied()))
     }
 }
 /// ISO 4063:2023 forms: `135`, a group `13`, a variant `131-D`, a hybrid `522+15`.

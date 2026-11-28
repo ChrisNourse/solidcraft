@@ -260,6 +260,29 @@ mod weld_tests {
             assert!(settings.validate().is_err());
         }
     }
+
+    #[test]
+    fn weld_tolerances_are_left_out_of_files_until_set_and_replace_the_silent_band() {
+        use crate::weld::WeldSettings;
+        use crate::weld_tolerance::{Deviation, Joint, Level, Sizes};
+        let plain = WeldSettings::default();
+        assert!(serde_json::to_value(&plain).unwrap().get("tolerances").is_none(), "files without it read as before");
+        let sizes = Sizes { t: 10.0, reach: Some(6.0), ..Sizes::default() };
+        let iso = plain.tolerance(Joint::Fillet, Deviation::Gap, sizes, Level::C).unwrap();
+        assert!(iso.silent > 1.34 && iso.silent < 1.35, "{}", iso.silent);
+        let aws = WeldSettings { symbol_standard: "aws_a2_4_2020".into(), ..Default::default() };
+        assert_eq!(aws.tolerance(Joint::Fillet, Deviation::Gap, sizes, Level::C).unwrap().silent, 2.0);
+        let mine = WeldSettings { tolerances: [("gap".into(), 0.5)].into_iter().collect(), ..Default::default() };
+        mine.validate().unwrap();
+        let band = mine.tolerance(Joint::Fillet, Deviation::Gap, sizes, Level::C).unwrap();
+        assert_eq!((band.silent, band.refused_past), (0.5, Some(6.0)));
+        let back: WeldSettings = serde_json::from_value(serde_json::to_value(&mine).unwrap()).unwrap();
+        assert_eq!(back, mine);
+        for (key, value) in [("gaps", 0.5), ("gap", -0.1), ("gap", f64::NAN), ("tilt", 1e6)] {
+            let bad = WeldSettings { tolerances: [(key.into(), value)].into_iter().collect(), ..Default::default() };
+            assert!(bad.validate().is_err(), "{key} {value}");
+        }
+    }
 }
 
 fn rel(a: f64, b: f64) -> f64 {
