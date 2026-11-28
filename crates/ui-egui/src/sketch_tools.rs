@@ -2272,8 +2272,9 @@ pub(crate) fn drop_gone_picks(app: &SolveApp, t: &mut Tool) -> bool {
     t.picks.retain(|_| flags.next().copied().unwrap_or(true));
     crate::sketch_dims::reset(t);
     // A constraint tool ends on a right-click whatever it holds; only a tool that applies on one
-    // keeps on for it.
-    t.picks_dropped = entities && t.picks.is_empty();
+    // keeps on for it, and a construction line tool, whose right-click clears its reference and
+    // keeps on.
+    t.picks_dropped = (entities || construction) && t.picks.is_empty();
     true
 }
 

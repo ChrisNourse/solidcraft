@@ -945,15 +945,19 @@ fn a_parallel_construction_line_keeps_a_reference_that_stands() {
     assert_eq!(h.app.tool.as_ref().map(|t| t.picks.clone()), Some(vec!["gone".to_string()]));
 }
 
-/// A right-click still ends the Parallel construction line after the Undo button took its
-/// reference away.
+/// A right-click on a construction line tool clears its reference and keeps the tool on, so after
+/// the Undo button took the reference away the first right-click keeps the tool on and the second
+/// ends it, as before #23702.
 #[test]
-fn a_parallel_construction_line_whose_reference_was_undone_ends_on_a_right_click() {
+fn a_parallel_construction_line_whose_reference_was_undone_ends_on_a_second_right_click() {
     let mut h = reference_then_undone("sketch.construction_line.parallel", true, &[[10., 30.]], true);
     h.step(&json!({"click":{"sketch":[5., 10.]}})).unwrap();
     assert_eq!(h.app.tool.as_ref().map(|t| t.picks.len()), Some(0), "the lost reference is dropped");
+    assert!(!h.app.status.as_ref().is_some_and(|s| s.2), "{:?}", h.app.status);
     h.step(&json!({"click":{"sketch":[5., 10.]},"button":"right"})).unwrap();
-    assert!(h.app.tool.is_none(), "the right-click ends the tool");
+    assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some("sketch.construction_line.parallel"), "the first right-click keeps the tool on");
+    h.step(&json!({"click":{"sketch":[5., 10.]},"button":"right"})).unwrap();
+    assert!(h.app.tool.is_none(), "the second right-click ends the tool");
 }
 
 /// A segment's start is placed against the reference, so it goes with a lost one (#23702).
@@ -965,5 +969,5 @@ fn a_segment_start_goes_with_a_reference_that_was_undone() {
     tool.pts = vec![(solidcore_record::Vec2::new(5.0, 10.0), None)];
     assert!(crate::sketch_tools::drop_gone_picks(&h.app, &mut tool));
     assert!(tool.picks.is_empty() && tool.pts.is_empty(), "{:?} {:?}", tool.picks, tool.pts);
-    assert!(!tool.picks_dropped, "a right-click still ends the tool");
+    assert!(tool.picks_dropped, "the right-click that would clear the reference keeps the tool on");
 }
