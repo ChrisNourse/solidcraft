@@ -4854,6 +4854,16 @@ fn a_rib_or_raised_cell_grid_apart_from_its_body_says_it_left_pieces() {
             assert!(n == 1 && !warning.contains("separate pieces"), "grid at x {x0}: {n} pieces, {reply}");
         }
     }
+    // A Mirror rebuilds a Rib at its copy: a Rib on A mirrored across x = 40 lands apart from A,
+    // and says so without the hint. (A Mirror refuses a Cell Grid.)
+    let mut s = on_box(json!("XY"));
+    run(&mut s, "sketch.line", json!({"points": [[20, 10], [30, 10]], "ids": ["r1"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.rib", json!({"sketch": "S", "curves": ["r1"], "thickness": 2, "depth": 5, "name": "Rib"}));
+    let reply = run(&mut s, "solid.mirror", json!({"features": ["Rib"], "plane": {"origin": [40, 0, 0], "normal": [1, 0, 0]}}));
+    let warning = reply["warning"].as_str().unwrap_or_default();
+    assert!(pieces(&s) == 2 && warning.contains(&apart(2)) && !warning.contains("New Body"), "mirrored rib: {reply}");
+
     let mut s = on_box(json!("XY"));
     run(&mut s, "sketch.line", json!({"points": [[40, 0], [60, 0]], "ids": ["l1"]}));
     run(&mut s, "sketch.finish", json!({}));
