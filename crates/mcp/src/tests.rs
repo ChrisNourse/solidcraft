@@ -3850,6 +3850,7 @@ fn bridged_rollback_batch_refuses_commands_that_can_switch_design_tabs() {
         (json!({"command": "open", "params": {"path": "another.sc", "new_tab": true}}), "doc.open"),
         (json!({"id": "file.import", "params": {"path": "another.part"}}), "file.import"),
         (json!({"command": "document.activate", "params": {"document_id": "another"}}), "document.activate"),
+        (json!({"command": "document.close", "params": {"document_id": "current"}}), "document.close"),
         (json!({"id": "file.new", "params": {"new_tab": true}}), "file.new"),
         (json!({"command": "new_design", "params": {"new_tab": true}}), "file.new"),
     ] {
