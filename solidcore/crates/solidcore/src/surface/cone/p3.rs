@@ -1118,7 +1118,9 @@ impl Cone {
 /// touch does not have.
 ///
 /// Returns whether the general intersection is still needed: where the overlap is past the
-/// contact tolerance, greatest between the ends, or a radius is negative.
+/// contact tolerance, greatest between the ends, or a radius is negative, and where the faces
+/// share no more than one height (a drill's point against the other drill's wall, which meet
+/// only at their rims, where the walls' own touching line ends).
 fn parallel_walls_in_contact(
     k: &Kernel,
     cone: &Cone,
@@ -1148,7 +1150,9 @@ fn parallel_walls_in_contact(
     ];
     let low = max2(trim.v_min(), min2(other_ends[0], other_ends[1]));
     let high = min2(trim.v_max(), max2(other_ends[0], other_ends[1]));
-    if low.is_nan() || high.is_nan() || low > high {
+    // Faces that share one height only meet at their end circles, where the walls next to
+    // them decide the contact; that is left to the general intersection as before.
+    if low.is_nan() || high.is_nan() || high - low <= tol {
         return Ok(true);
     }
     let circles = |h: f64| {

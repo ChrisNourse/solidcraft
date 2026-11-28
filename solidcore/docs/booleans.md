@@ -836,6 +836,10 @@ What the port does today:
   points (one point, or the generator between the two ends) and cross nowhere; a hole whose
   wall grazes a hollow cone's inner wall at its rim had its wall traced along the thin lens
   between the rim circles' crossings, a face of the hole that the merge then found in no region.
+  Faces sharing no more than one height (a drill's point against the other drill's wall, which
+  meet only at their rims) are left to the marching intersection: a touching point there left
+  the other rim unsplit at the end of the walls' touching line
+  (`solidcore-ops` `boolean.rs`, `parallel_holes_a_hair_less_than_tangent_cut_as_touching`).
   Parallel cones overlapping past the tolerance (drill points) are still met by the marching
   intersection, and so are coplanar faces bounded by such circles.
 - **A contact at the tolerance.** Each site decides the contact from its own copy of the two
