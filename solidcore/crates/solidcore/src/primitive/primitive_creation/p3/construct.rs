@@ -41,6 +41,10 @@
 //! Not upstream: [`PrimitiveCreation::create_skin_from_faces_traced`] takes how the skin
 //! leaves its end sections ([`SkinEnd`]); a free end is the skin as it always was, a square
 //! one is skinned by [`crate::sweep::skin_ends`].
+//! Not upstream (#11759): a layer's skin whose control lines across the sections turn back
+//! on themselves (the chord-length parameters follow sections that widen by a jump) gets
+//! knots across the sections (`refined_across_sections`), so the check accepts its net;
+//! the surface is unchanged, and a skin whose net does not turn back is built as before.
 //! **Statuses pass on** (WR-662; SolidCraft change, tangency-labs/smlib c8f6a31): the
 //! statuses upstream drops here are returned (`SER`).
 
@@ -64,6 +68,7 @@ use crate::nurbs::b_spline_surface_n_lib::p2::SkinnedSurfaceOptions;
 use crate::nurbs::knots::Side;
 use crate::primitive::primitive_creation::{p1::PrimitiveCreation, SweepOptions};
 use crate::surface::procedural_sweep::ProceduralSweep;
+use crate::surface::surface::assert_valid::grid_has_non_monotonic_points_to_rounding;
 use crate::surface::surface::{
     p2::{BlendEndType, CurvatureType, DerivSurfDefinition},
     Surface,
@@ -736,6 +741,13 @@ impl PrimitiveCreation {
             Ok(Some(again)) => surfaces = again,
             Err(e) if e.is_unported_or_cancelled() => return Err(e),
             Ok(None) | Err(_) => {}
+        }
+        // Not upstream: a skin whose net turns back across the sections is refined there
+        // (#11759).
+        for (surface, _) in &mut surfaces {
+            if let Some(refined) = refined_across_sections(surface)? {
+                *surface = refined;
+            }
         }
         let mut traced: Vec<(FaceId, Vec<usize>)> = Vec::new();
         let mut made = Vec::new();
@@ -1617,6 +1629,65 @@ fn sweep_ends_coincide(
     let weight_gap = (hi - lo) / lo;
     let bound = (gap_bound + radius * weight_gap) * (1.0 + gamma(8));
     Ok(bound.is_finite() && bound <= tol)
+}
+
+/// How many times [`refined_across_sections`] halves every span at most. Three halvings of a
+/// span bound the extra control points; the check still judges the refined skin without
+/// any tolerance adjusted, as `refine_control_net` in `sweep/skin_planar_g1.rs` does for the
+/// planar G1 skin.
+const REFINE_ACROSS_SECTIONS: usize = 3;
+
+/// `surface`, a layer's skin (its sections U isoparameters), with a knot at the middle of
+/// every span across the sections, up to [`REFINE_ACROSS_SECTIONS`] times, while one of its
+/// control lines across the sections turns back on itself ([`turns_back_across_sections`]);
+/// `None` where none does, or for a ruled skin, whose net is the skin. The chord-length
+/// parameters follow the sections' outer points: where the sections widen by a jump, a line
+/// of control points straight along the loft (a point every section has) can step past the
+/// next and back, though the skin runs on, and the check refuses the net (#11759). Knot
+/// insertion keeps the surface and brings the net to it, as the planar G1 skin refines its
+/// own along the sections.
+fn refined_across_sections(surface: &BSplineSurface) -> Result<Option<BSplineSurface>> {
+    if surface.degree(SurfParamType::U) < 2 {
+        return Ok(None);
+    }
+    let mut refined: Option<BSplineSurface> = None;
+    for _ in 0..REFINE_ACROSS_SECTIONS {
+        let current = refined.as_ref().unwrap_or(surface);
+        if !turns_back_across_sections(current)? {
+            break;
+        }
+        let (knots, _) = current.knots(SurfParamType::U, None)?;
+        let midpoints: Vec<f64> = knots
+            .windows(2)
+            .filter_map(|pair| {
+                let &[a, b] = pair else { return None };
+                let mid = a + (b - a) * 0.5;
+                (a < mid && mid < b).then_some(mid)
+            })
+            .collect();
+        let mut next = current.clone();
+        next.insert_knots(SurfParamType::U, &midpoints)?;
+        refined = Some(next);
+    }
+    Ok(refined)
+}
+
+/// Whether a control line of `surface` across the sections (U, one for each V index) turns
+/// back on itself as test #5 of the check reads a net
+/// ([`grid_has_non_monotonic_points_to_rounding`]): each line as both columns of a grid two
+/// points wide, whose rows do not move, so only the line's own turns count.
+fn turns_back_across_sections(surface: &BSplineSurface) -> Result<bool> {
+    let net = surface.control_point_net()?;
+    for v in 0..net.v_count {
+        let line: Vec<Point3> = (0..net.u_count)
+            .filter_map(|u| net.points.get(u.checked_mul(net.v_count)?.checked_add(v)?))
+            .flat_map(|&p| [p, p])
+            .collect();
+        if grid_has_non_monotonic_points_to_rounding(&line, 2, false, false)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Each of `faces`' V interval: its surface's natural domain across the sections
