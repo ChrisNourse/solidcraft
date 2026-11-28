@@ -3439,7 +3439,8 @@ fn field_row(app: &SolveApp, ui: &mut egui::Ui, plugin: &Listed, field: &Field, 
                             titles: &titles,
                             textures: &tiles,
                             choose: &choose,
-                            search_hint: app.tr("ui.plugin_swatch_search"),
+                            // Pictured parts are not finishes: their search says just that (#23596).
+                            search_hint: if field.pictured { app.tr("Search") } else { app.tr("ui.plugin_swatch_search") },
                             preview: field.pictured,
                         },
                     )
