@@ -1918,9 +1918,12 @@ impl SolveApp {
         if self.file_load_holds() || self.file_picker.is_some() || self.saving.is_some() {
             return Err("a file operation is in progress".into());
         }
-        // The window has the design tabs, which the engine does not: it shows the design asked for.
+        // The window has the design tabs, which the engine does not: it shows or closes the design asked for.
         if id == "document.activate" {
             return documents::command(self, id, &params);
+        }
+        if id == "document.close" {
+            return documents::close_clean(self, &params);
         }
         // `new_tab`: the design opens in a tab of its own and the active one stays as it was.
         if matches!(id, "file.new" | "doc.open") && documents::take_new_tab(&mut params) {

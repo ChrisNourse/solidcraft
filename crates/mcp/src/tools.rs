@@ -2150,8 +2150,10 @@ fn batch_run(b: &mut dyn Backend, a: &Map<String, Value>, dry_run: bool, expect:
                 Some(c)
                     if rollback
                         && b.has_ui()
-                        && (matches!(c, "view.next_tab" | "view.previous_tab" | "document.activate" | "doc.open" | "file.import")
-                            || (c == "file.new" && command_params.and_then(|p| p.get("new_tab")).and_then(Value::as_bool) == Some(true))) =>
+                        && (matches!(
+                            c,
+                            "view.next_tab" | "view.previous_tab" | "document.activate" | "document.close" | "doc.open" | "file.import"
+                        ) || (c == "file.new" && command_params.and_then(|p| p.get("new_tab")).and_then(Value::as_bool) == Some(true))) =>
                 {
                     Err(format!("`{c}` can change the active design tab: run it separately or use `rollback: false`"))
                 }
