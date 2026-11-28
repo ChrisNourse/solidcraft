@@ -1034,8 +1034,8 @@ pub struct SolveApp {
     pub mesh_units: Option<mesh_units::Ask>,
     /// A STEP, IGES, FreeCAD, Rhino or glTF file waiting for its import options (`import_options`).
     pub import_options: Option<import_options::Ask>,
-    /// Files asked while another waits for its options (several dropped at once), asked in turn.
-    pub import_options_waiting: std::collections::VecDeque<import_options::Ask>,
+    /// Files waiting for the current import dialog, in the order they were received.
+    pub(crate) import_options_waiting: std::collections::VecDeque<import_options::Prompt>,
     /// The Plugins menu and the open plugin entry dialog (`plugin_menu`).
     pub(crate) plugin_menu: plugin_menu::State,
     /// The view background a plugin draws (`shaders@0.1`), when one is chosen.

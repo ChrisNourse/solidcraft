@@ -318,6 +318,7 @@ fn plate_doc() -> (Document, u64) {
                 symmetric_offset: false,
                 through_all: false,
                 second_follows_first: false,
+                through_all_to_corner: false,
                 taper: None,
                 taper2: None,
                 corner: Default::default(),
@@ -435,6 +436,7 @@ fn an_outline_closed_by_point_on_curve_tangent_joints_extrudes() {
                 symmetric_offset: false,
                 through_all: false,
                 second_follows_first: false,
+                through_all_to_corner: false,
                 taper: None,
                 taper2: None,
                 corner: Default::default(),
@@ -2137,6 +2139,7 @@ fn box_fillet_cut_timeline() {
                 symmetric_offset: false,
                 through_all: false,
                 second_follows_first: false,
+                through_all_to_corner: false,
                 taper: None,
                 taper2: None,
                 corner: Default::default(),
@@ -3260,6 +3263,7 @@ fn a_split_of_a_body_of_two_pieces_gives_the_halves_of_both() {
                 symmetric_offset: false,
                 through_all: false,
                 second_follows_first: false,
+                through_all_to_corner: false,
                 taper: None,
                 taper2: None,
                 corner: Default::default(),
@@ -3778,6 +3782,7 @@ fn an_extruded_ellipse_or_spline_is_one_wall_named_by_its_curve() {
             symmetric_offset: false,
             through_all: false,
             second_follows_first: false,
+            through_all_to_corner: false,
             taper: None,
             taper2: None,
             corner: Default::default(),
@@ -4183,6 +4188,24 @@ fn thread_target_body_identities_follow_face_slots_and_reference_remapping() {
     assert_eq!(saved["target_bodies"], serde_json::json!(["Renamed", "B", "Renamed"]));
     let reopened: FeatureKind = serde_json::from_value(saved).unwrap();
     assert_eq!(reopened, kind);
+}
+
+/// Surface Fillet and Chamfer name and find each pick on its own body (#769): `a` on `a.body`,
+/// `b` on `b.body`, never on another body with a face at the same point.
+#[test]
+fn surface_fillet_and_chamfer_scope_each_face_slot_to_its_body() {
+    for kind in ["surface_fillet", "surface_chamfer"] {
+        let kind: FeatureKind = serde_json::from_value(serde_json::json!({
+            "type": kind, "a": {"body": "A", "point": [0, 5, 0]}, "b": {"body": "B", "point": [0, 0, 5]},
+            "radius": "2 mm", "distance": "2 mm"
+        }))
+        .unwrap();
+        assert_eq!(kind.face_points(), vec![Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 0.0, 5.0)]);
+        assert_eq!([kind.face_slot_body(0), kind.face_slot_body(1), kind.face_slot_body(2)], [Some("A"), Some("B"), None]);
+    }
+    // Other kinds keep their own rule: a thread's slot is its target body, the rest none.
+    let thread: FeatureKind = serde_json::from_value(serde_json::json!({"type": "thread", "face": [3, 0, 2], "target_bodies": ["T"]})).unwrap();
+    assert_eq!(thread.face_slot_body(0), Some("T"));
 }
 
 #[test]
@@ -5547,6 +5570,7 @@ fn capture_position_20644_isolation_for_to_object_mirror_pattern_plane_and_joint
                     start_offset: None,
                     symmetric_offset: false,
                     through_all: false,
+                    through_all_to_corner: false,
                     second_follows_first: false,
                     taper: None,
                     taper2: None,
@@ -5893,6 +5917,7 @@ fn extrude_start_offset_caps_are_named_consistently_across_rotations() {
                         start_offset: Some("4".into()),
                         symmetric_offset: false,
                         through_all: false,
+                        through_all_to_corner: false,
                         second_follows_first: false,
                         taper: None,
                         taper2: None,
