@@ -41,6 +41,7 @@ mod dome;
 mod draft_corners;
 pub mod drawing_centre_mark;
 mod emboss;
+pub mod exact;
 mod face_flux;
 #[cfg(test)]
 mod face_source_tests;
@@ -54,6 +55,7 @@ mod form_cell;
 mod freeform;
 pub mod fuzz;
 mod heal;
+mod held;
 mod helix;
 pub mod history;
 pub mod hlr;
@@ -201,6 +203,7 @@ pub use blend::chamfer_sides_max_why;
 pub use blend::fillet_g2;
 pub use blend::fillet_g2_corners;
 pub use blend::fillet_g2_with_g2_corners;
+pub use blend::fillet_keep_edge;
 pub use blend::fillet_least_setback;
 pub use blend::fillet_max;
 pub use blend::fillet_max_each;
@@ -355,6 +358,9 @@ pub use fill::PatchSpec;
 pub use fill::patch_edges_crowned;
 pub use fill::patch_edges_report;
 pub use fill::patch_edges_with;
+pub use held::RecordReadSite;
+pub use held::RecordReads;
+pub use held::record_reads;
 pub use helix::MAX_HELIX_TURNS;
 pub use helix::require_unfolded_screw_section;
 pub use helix::sweep_helix_mesh;
@@ -426,6 +432,7 @@ pub use polyhedron::offset_solid;
 pub use polyhedron::offset_tool;
 pub use prism::PLANAR_FIT_TOL;
 pub use prism::fill_channel;
+pub use prism::fill_margin;
 pub use prism::planar_regions_boolean;
 pub use prism::{ChannelFill, Contour, FillFailure, FillNote, FillOptions, FillRefusal, FillSide};
 pub use prism_curve::PlanarPiece;
@@ -526,6 +533,7 @@ pub use route::sweep_with;
 pub use route::tessellate;
 pub use route::thicken;
 pub use route::torus;
+pub use route::transform_face;
 pub use route::trim_member;
 pub use route::tube_cope;
 pub use route::which;
@@ -657,6 +665,7 @@ pub use surface_trim::trim_dropped_keep;
 pub use surface_trim::trim_sheet_keep;
 pub use surface_untrim::UntrimHoles;
 pub use surface_untrim::untrim;
+pub use surfaces::SpaceLoftSection;
 pub use surfaces::copy_faces;
 pub use surfaces::extend;
 pub use surfaces::extrude_sheet;
@@ -664,8 +673,11 @@ pub use surfaces::extrude_sheet_tapered;
 pub use surfaces::loft_section_closed;
 pub use surfaces::loft_sheet;
 pub use surfaces::loft_sheet_planar_g1;
+pub use surfaces::loft_sheet_space_with_rails;
+pub use surfaces::loft_sheet_space_with_rails_legacy_sides;
 pub use surfaces::loft_sheet_with_rails;
 pub use surfaces::loft_sheet_with_rails_legacy_sides;
+pub use surfaces::morph_surface;
 pub use surfaces::patch_edges;
 pub use surfaces::patch_region;
 pub use surfaces::remove_faces;
@@ -679,6 +691,7 @@ pub use surfaces::sweep_sheet_points;
 pub use surfaces::sweep_sheet_points_with;
 pub use surfaces::sweep_sheet_with;
 pub use surfaces::unstitch;
+pub use surfaces::{check_round_picks, rounded_parts};
 pub use sweep_path::RailFit;
 pub use sweep_path::SweepControl;
 pub use sweep_path::SweepOrientation;
@@ -721,6 +734,9 @@ pub use validity::validity;
 pub enum KernelError {
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// A stored B-rep number failed the coordinate ceiling check.
+    #[error("invalid input: {cause}", cause = solidcore_record::brep::Invalid(BREP_COORDINATE_CEILING))]
+    CoordinateCeiling,
     #[error("the operation failed: {0}")]
     Failed(String),
     /// A blend or other size too large for the geometry around it (a smaller size may work);
@@ -747,6 +763,8 @@ pub enum KernelError {
 }
 
 pub type Result<T> = std::result::Result<T, KernelError>;
+
+const BREP_COORDINATE_CEILING: &str = "non-finite or excessive coordinate";
 
 /// Most guide rails a loft takes. solidcore states the same limit (`solidcore::sweep::loft_rails`);
 /// the kernel does not depend on solidcore, so the number is repeated here.

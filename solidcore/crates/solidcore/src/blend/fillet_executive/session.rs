@@ -417,6 +417,10 @@ struct SessionObjects<'target> {
     /// ([`FilletSession::set_roll_over_pass`]), and its vertices V, the corners where the
     /// concave chain meets the cliff (empty: not the second pass).
     roll_over_ends: Vec<VertexId>,
+    /// Not upstream (#16404): the point of the first vertex where the corners step found a
+    /// face beside a blended edge closing to a point
+    /// ([`crate::blend::fillet_corner::p3::face_closes_to_a_point`]).
+    narrowing_vertex: Option<crate::math::Point3>,
     /// The fork's `m_vSetBackVertices` (`AddSetBackVertex`; WR-697, 79d4763): the
     /// vertices the caller sets back, where no Ball is built.
     set_back_vertices: Vec<VertexId>,
@@ -1879,6 +1883,7 @@ impl<'target> FilletSession<'target> {
                 roll_over_classify: false,
                 roll_overs: Vec::new(),
                 roll_over_ends: Vec::new(),
+                narrowing_vertex: None,
                 set_back_vertices: Vec::new(),
                 set_back_fills: Vec::new(),
                 radius_corner_surfaces: Vec::new(),
@@ -2453,6 +2458,7 @@ impl<'target> FilletSession<'target> {
             roll_over_classify,
             roll_overs,
             roll_over_ends,
+            narrowing_vertex,
             ..
         } = &mut self.objects;
         let turns = *turns;
@@ -2546,6 +2552,53 @@ impl<'target> FilletSession<'target> {
                     },
                     roll_over_classify.then_some(&mut *roll_overs),
                 )?;
+                // Not upstream (#16404): a face beside a blended edge that closes to a point at
+                // the vertex (between that edge and one of the other convexity not blended
+                // there, or two blended edges of one convexity) leaves no room for a blend of
+                // any size. The vertex is noted, and a later failure of the blend that gives no
+                // other reason is given as it (the boss's base circle touching the rim of the
+                // face it stands on, whose corner builds and then fails to make its topology; a
+                // chamfer's tangent chain from a hole's rim on to the bottom edge the hole
+                // touches, #1390, whose corner is unsupported). Nothing is refused here, so a
+                // blend that builds is never refused. A round that runs out at the vertex (the
+                // degenerate corner) has no width there and builds, so it is not read.
+                if narrowing_vertex.is_none()
+                    && !made
+                        .as_ref()
+                        .is_some_and(|c| c.kind == FilletCornerKind::Degenerate)
+                {
+                    // the tightest tangency tolerance of the vertex's solvers, as the corner
+                    // takes it
+                    let mut tangency_tol_radians = f64::INFINITY;
+                    for &edgeuse in &edgeuses {
+                        let object =
+                            FilletObject::Topology(FilletBody::Target, EntityRef::Edgeuse(edgeuse));
+                        let Some(FilletObject::Solver(id)) =
+                            executive.fillet_solver_of_edgeuse(object)
+                        else {
+                            continue;
+                        };
+                        if let Some(s) = solvers.get(id.0 as usize).and_then(Option::as_ref) {
+                            tangency_tol_radians =
+                                tangency_tol_radians.min(s.base().tangency_tolerance);
+                        }
+                    }
+                    // a walk the test cannot make notes nothing; cancellation stops the step
+                    let closes = tangency_tol_radians.is_finite()
+                        && match crate::blend::fillet_corner::p3::face_closes_to_a_point(
+                            k,
+                            target,
+                            &edgeuses,
+                            tangency_tol_radians,
+                        ) {
+                            Ok(closes) => closes,
+                            Err(e) if e.is_cancelled() => return Err(e),
+                            Err(_) => false,
+                        };
+                    if closes {
+                        *narrowing_vertex = crate::topology::vertex::point(target, vertex).ok();
+                    }
+                }
                 let Some(mut corner) = made else {
                     // The vertex's point feeds the opt-in vertex error note, as the
                     // fork's corrected overload reads it from the vertex itself.
@@ -3248,6 +3301,14 @@ impl<'target> FilletSession<'target> {
     /// passes. Off by default. Set it before [`Self::create_corners`].
     pub fn set_roll_over_classify(&mut self, classify: bool) {
         self.objects.roll_over_classify = classify;
+    }
+
+    /// Not upstream (#16404): the point of the first vertex where the corners step found a
+    /// face beside a blended edge closing to a point, so that no blend of any size fits there;
+    /// `None` where it found none.
+    #[must_use]
+    pub fn narrowing_vertex(&self) -> Option<crate::math::Point3> {
+        self.objects.narrowing_vertex
     }
 
     /// Not upstream (#10876): the Roll-over corners noted by the corners step
@@ -5885,10 +5946,12 @@ impl FaceConstructionAccess<FilletObject> for SessionObjects<'_> {
                     return Ok(());
                 }
                 // The fork's (smlib 41a39ec): an End at a smooth vertex's patch is its cap
-                // (SmBlendCorner::CreateEndPatchOfEnd)
-                if corner.blend.is_some_and(|blend| {
-                    blend.is_end() && blend.end == crate::blend::blend_corner::BlendEnd::AtSmooth
-                }) {
+                // (SmBlendCorner::CreateEndPatchOfEnd); so is a capped End's whose rail never
+                // reaches its side edge
+                if corner
+                    .blend
+                    .is_some_and(crate::blend::blend_corner::BlendCorner::has_end_cap)
+                {
                     let mut no_note = |_: &FilletCorner| {};
                     let built = {
                         let mut env = CornerPatchEnv {
@@ -6817,12 +6880,17 @@ impl SolverGeometryAccess<FilletObject> for SessionObjects<'_> {
         // `e`, so no sample of the pair can pass the band test. The boxes are
         // guaranteed bounds, never sampled extremes: the control polygon's box of a
         // B-spline (or line) with positive weights holds the whole curve (the convex
-        // hull property), and a curve of any other kind is not pruned.
+        // hull property), and a curve of any other kind is not pruned. An edge is boxed
+        // over its own interval (#22590), since its foot `e` is found on that part only.
         let margin = 100.0 * tol + apart;
         let mut edge_boxes: Vec<Option<Extent3d>> = Vec::new();
         for &(edge, _) in &edges {
             let e = self.target.edge(edge)?;
-            edge_boxes.push(e.curve.as_ref().and_then(control_hull_box));
+            edge_boxes.push(
+                e.curve
+                    .as_ref()
+                    .and_then(|curve| edge_hull_box(k, curve, &e.interval)),
+            );
         }
         let rail_boxes: Vec<Vec<Option<Extent3d>>> = rails
             .iter()
@@ -7669,6 +7737,34 @@ fn control_hull_box(curve: &crate::curve::curve::Curve) -> Option<Extent3d> {
         hull.add_point(p);
     }
     Some(hull)
+}
+
+/// The band check's box of an edge: a box holding the part of `curve` over the edge's
+/// `interval`, for the curves [`control_hull_box`] bounds: the box of the control points of the spans that part covers
+/// ([`crate::curve::curve::Curve::calculate_bounding_box`]). Those control points hold the
+/// curve over those spans (the convex hull property, span by span), so the box is a
+/// guaranteed bound as [`control_hull_box`]'s is. It is the box of an edge's own part of a
+/// longer curve: the edges a loft leaves on one curve of many spans, each on its span, are
+/// boxed round that span, not round the whole curve (#22590, where every one of 426 rim
+/// edges had the 538 mm box of the whole rim and no pair was pruned). `None` where
+/// [`control_hull_box`] gives none, or the box cannot be computed: that edge is not pruned.
+fn edge_hull_box(
+    k: &Kernel,
+    curve: &crate::curve::curve::Curve,
+    interval: &crate::geom::extent1d::Extent1d,
+) -> Option<Extent3d> {
+    control_hull_box(curve)?;
+    let req = crate::nurbs::b_spline_curve::BoundingBoxRequest {
+        normal: true,
+        pseudo: false,
+        polar: false,
+    };
+    let bx = curve
+        .calculate_bounding_box(k, interval, req, false)
+        .ok()?
+        .normal?;
+    let finite = (0..3).all(|i| bx.min_at(i).is_finite() && bx.max_at(i).is_finite());
+    (bx.is_defined() && finite).then_some(bx)
 }
 
 impl SolverLoadingAccess<FilletObject> for SessionObjects<'_> {
@@ -8600,13 +8696,42 @@ impl SessionObjects<'_> {
         let corner = corners
             .get_mut(id.0 as usize)
             .ok_or_else(|| invalid("corner is not live"))?;
-        corner.make_nx2_corner_topology(crate::blend::fillet_corner::topology::Nx2TopologyEnv {
-            k,
-            target,
-            pseudo,
-            corner: id,
-            solvers,
-        })
+        let vertex = corner.vertex;
+        let location = match vertex {
+            Some(v) => crate::topology::vertex::point(target, v).ok(),
+            None => None,
+        };
+        let made = corner.make_nx2_corner_topology(
+            crate::blend::fillet_corner::topology::Nx2TopologyEnv {
+                k,
+                target,
+                pseudo,
+                corner: id,
+                solvers,
+            },
+        );
+        // Not the fork's (#17600): two blends side by side round a vertex of four edges have
+        // no corner (only opposite ones are mitred); refused at the vertex with that reason
+        // (`CornerUnsupported`), which the executive keeps, rather than as a bare topology
+        // failure
+        if let Err(e) = &made {
+            if matches!(
+                e.blend_failure(),
+                Some(crate::error::blend::BlendFailure::CornerShapeNotBuilt(
+                    crate::error::blend::CornerShape::AdjacentBlendedEdges
+                ))
+            ) {
+                executive.error.note_vertex_error(
+                    vertex
+                        .map(|v| FilletObject::Topology(FilletBody::Target, EntityRef::Vertex(v))),
+                    location,
+                    crate::blend::fillet_geom::p1::FilStatus::Failure,
+                    crate::blend::fillet_geom::p1::FilletErrorType::CornerUnsupported,
+                    Some(NX2_BLENDS_SIDE_BY_SIDE),
+                );
+            }
+        }
+        made
     }
     /// The support change's topology (#19089) with the solvers of its three rounds, as its
     /// classification found them.
@@ -9256,6 +9381,9 @@ impl SessionObjects<'_> {
     }
 }
 
+/// The Nx2 corner of four edges refused where its two blends are side by side (#17600).
+const NX2_BLENDS_SIDE_BY_SIDE: &str = "Fillet Error: two rounds side by side round a vertex of four edges would meet in a step there, a corner that is not built yet; round only one of the two edges";
+
 /// The Nx1 corner refused at a cusp (solidcraft#13156).
 const NX1_CUSP_SIDE_EDGE: &str = "Fillet Error: the blend's band runs off its face, which comes to a point at the vertex (a side edge leaves it along the blended edge)";
 
@@ -9582,11 +9710,46 @@ mod tests {
     use crate::curve::curve::Curve;
     use crate::curve::line::Line;
     use crate::geom::tol::USE_DEFAULT;
+    use crate::math::det;
     use crate::math::Point3;
     use crate::topology::brep::p2::ArenaNotifyState;
     use crate::topology::brep::p8::{create_planar_face_with_3d_curves, FaceBuildEnv};
     use crate::topology::loopuse;
     use crate::topology::topology_traverser::Marks;
+
+    /// #22590: the band check boxes an edge round its own part of its curve, not round the
+    /// whole curve. The 426 rim edges a loft left on one spline of many spans each had the
+    /// 538 mm box of the whole rim, so the check pruned none of their pairs and a round of the
+    /// rim did not finish in 25 minutes. An edge on a sixteenth of a circle of radius 100 and
+    /// one on a tenth of a 100 mm line: each box holds its part and is far smaller than the
+    /// curve's.
+    #[test]
+    fn the_band_check_boxes_an_edge_round_its_own_part_of_a_long_curve() {
+        use crate::primitive::api_curves::{create_circle, create_line_segment};
+        let k = Kernel::new(&crate::kernel::KernelOptions::default());
+        let circle = Curve::from(create_circle(Point3::new(0.0, 0.0, 0.0), 100.0).unwrap());
+        let line = Curve::from(
+            create_line_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(100.0, 0.0, 0.0)).unwrap(),
+        );
+        for (curve, from, to) in [(&circle, 0.30, 0.3625), (&line, 0.45, 0.55)] {
+            let all = curve.natural_interval();
+            let part =
+                crate::geom::extent1d::Extent1d::from_min_max(all.evaluate(from), all.evaluate(to));
+            let whole = control_hull_box(curve).unwrap().size().length();
+            let own = edge_hull_box(&k, curve, &part).unwrap();
+            for s in 0..=32 {
+                let p = curve
+                    .evaluate_point(&k, part.evaluate(f64::from(s) / 32.0))
+                    .unwrap();
+                assert!(own.contains_point(p, 1e-9), "{p:?} outside {own:?}");
+            }
+            let size = own.size().length();
+            assert!(
+                size < 0.5 * whole,
+                "the edge's box {size} against the curve's {whole}"
+            );
+        }
+    }
 
     /// Only the constant-radius solvers have fixed offsets an End's rail end can be solved
     /// with (#15906): a constant-distance solver solves its offset at each section and a
@@ -9663,7 +9826,7 @@ mod tests {
         let base: Vec<Point3> = (0..5)
             .map(|ii| {
                 let angle = std::f64::consts::TAU * f64::from(ii) / 5.0;
-                Point3::new(10.0 * angle.cos(), 10.0 * angle.sin(), 0.0)
+                Point3::new(10.0 * det::cos(angle), 10.0 * det::sin(angle), 0.0)
             })
             .collect();
         let apex = Point3::new(0.0, 0.0, 15.0);
@@ -10521,6 +10684,7 @@ mod rails_fit_seam_tests {
     use crate::boolean::api_brep::boolean_difference;
     use crate::curve::curve::Curve;
     use crate::kernel::{KernelOptions, UpstreamFixes};
+    use crate::math::det;
     use crate::math::{Point3, Vec3};
     use crate::primitive::api_curves::{create_arc, create_line_segment};
     use crate::primitive::api_primitives::create_sphere;
@@ -10549,7 +10713,7 @@ mod rails_fit_seam_tests {
     /// (`tests/issue_2175_chamfer_rail_past_tangent_rim_end.rs` builds the same).
     fn body(k: &mut Kernel) -> Brep {
         let (c, r) = ((24.0625, 11.25), 26.5625);
-        let a = |p: (f64, f64)| (p.1 - c.1).atan2(p.0 - c.0);
+        let a = |p: (f64, f64)| det::atan2(p.1 - c.1, p.0 - c.0);
         let (s, mut e) = (a((0.0, 22.5)), a((0.0, 0.0)));
         while e < s {
             e += 2.0 * PI;
@@ -10730,7 +10894,7 @@ mod rails_fit_seam_tests {
         let axis = n.unitize().unwrap();
         let q = at(&curve, turn);
         let (u, v) = (p0 - centre, q - centre);
-        let angle = axis.dot(u.cross(v)).atan2(u.dot(v));
+        let angle = det::atan2(axis.dot(u.cross(v)), u.dot(v));
         let mut turned = crate::geom::axis2_placement::Axis2Placement::default();
         turned.init();
         turned.rotate_about_axis_at_point(angle, centre, axis);
