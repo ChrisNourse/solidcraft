@@ -10299,10 +10299,11 @@ pub fn second_side(first: f64, negative: bool, follows_first: bool) -> f64 {
     if along { 1.0 } else { -1.0 }
 }
 
-/// Distance that reaches through every target body from the plane `start` along the normal from
-/// the sketch plane (the From Object level plus any start offset), on either side.
-pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<f64> {
-    let mut far: f64 = 0.0;
+/// How far the target bodies' exact corners reach each way from `start` along the plane normal.
+/// Both are at least zero: below the start, then above it.
+fn through_all_side_reaches(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<(f64, f64)> {
+    let mut neg: f64 = 0.0;
+    let mut pos: f64 = 0.0;
     let mut any = false;
     for b in st.bodies.iter().filter(|b| targets.is_empty() || targets.contains(&b.name)) {
         let bb = b.body.exact_bounds().map_err(|e| DocError::Invalid(e.to_string()))?;
@@ -10316,13 +10317,25 @@ pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets:
                 if i & 2 == 0 { bb.min.y } else { bb.max.y },
                 if i & 4 == 0 { bb.min.z } else { bb.max.z },
             );
-            far = far.max((plane.height(p) - start).abs());
+            let h = plane.height(p) - start;
+            if h < 0.0 {
+                neg = neg.max(-h);
+            } else {
+                pos = pos.max(h);
+            }
         }
     }
     if !any {
         return Err(DocError::Invalid("through all needs a body to cut".into()));
     }
-    Ok(far * 1.02 + 1.0)
+    Ok((neg, pos))
+}
+
+/// Distance that reaches through every target body from the plane `start` along the normal from
+/// the sketch plane (the From Object level plus any start offset), on either side.
+pub fn through_all_distance(st: &ModelState, plane: &Plane, start: f64, targets: &[String]) -> Result<f64> {
+    let (neg, pos) = through_all_side_reaches(st, plane, start, targets)?;
+    Ok(neg.max(pos) * 1.02 + 1.0)
 }
 
 /// The body a face-based feature applies to: by name, or the one whose surface is nearest the
@@ -11205,11 +11218,22 @@ pub(crate) fn blend_edges_on(
         });
         let moved = moved_since.unwrap_or(false);
         let named = trusted_edge_name(f, i, p);
+        // On the body the pick was made on, a pick on an edge named alike but for its faces' tie
+        // numbers is that edge: the numbers moved, not the edge (#22230). An unchanged box does
+        // not show the body unmoved where an earlier feature places it whole.
+        let unmoved = moved_since == Some(false) && !placed;
         let Some(hit) = named.and_then(|n| crate::name_lookup::locate_projected_edge(mb, n, p).ok()) else {
             // #21997: the saved whole closed edge can now exist as the pieces a whole-turn
             // revolve join's turned seam split it into. Every piece is blended, as a pick made
             // today stores one name per piece.
             let Some(pieces) = named.and_then(|n| crate::name_lookup::recover_split_closed_edge(mb, n, p)) else {
+                // #22418: with the other number, the name can find no edge at all, where only one
+                // of the faces told apart by it meets the edge's other face; the pick then lies on
+                // the edge it is, clear of its ends.
+                if named.filter(|_| unmoved).and_then(|n| crate::name_lookup::retied_edge(mb, &mb.mesh(), n, None, p)).is_some() {
+                    out.push((i, p));
+                    continue;
+                }
                 if let Some(name) = named {
                     let makers = suppressed_edge_makers(doc, f, name);
                     if !makers.is_empty() {
@@ -11228,11 +11252,9 @@ pub(crate) fn blend_edges_on(
             notes.push(format!("the saved edge `{stored}` now exists as {} pieces; every piece is blended", pieces.len()));
             continue;
         };
-        // On the body the pick was made on, a pick off the named edge and on one named alike but for
-        // its faces' tie numbers is that edge: the numbers moved, not the edge (#22230). An
-        // unchanged box does not show the body unmoved where an earlier feature places it whole.
-        let hit = match (hit.on_point, moved_since) {
-            (false, Some(false)) if !placed => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, hit.edge, p)
+        // A pick off the named edge, on one named alike but for its faces' tie numbers (#22230).
+        let hit = match hit.on_point {
+            false if unmoved => crate::name_lookup::retied_edge(mb, &mb.mesh(), stored, Some(hit.edge), p)
                 .map_or(hit, |edge| crate::name_lookup::EdgeHit { edge, point: p, verified: false, on_point: true }),
             _ => hit,
         };
@@ -13454,8 +13476,35 @@ fn feature_tools_with_constructor(
                     // The reach is a length; a negative saved distance keeps its side (#10415).
                     // Measured from where the extrude starts, so an offset leaves no side short (#16556).
                     let start = from + extent.start_offset.as_deref().map(|e| val(vals, e, Kind::Length)).transpose()?.unwrap_or(0.0);
-                    let reach = through_all_distance(st, &ss.plane, start, &crate::plain(targets))?;
-                    through_all_side(reach, val(vals, &extent.distance, Kind::Length).ok())
+                    if *operation == Operation::Join && extent.through_all_to_corner {
+                        // A join stops on the exact corner height: a margin would leave material past the model.
+                        let saved_neg = val(vals, &extent.distance, Kind::Length).is_ok_and(|saved| saved < 0.0);
+                        let (neg, pos) = through_all_side_reaches(st, &ss.plane, start, &crate::plain(targets))?;
+                        let pure_symmetric = extent.direction == crate::Direction::Symmetric && extent.distance2.is_none();
+                        let travel_negative = match extent.direction {
+                            crate::Direction::Symmetric => extent.distance2.is_some() && saved_neg,
+                            crate::Direction::Negative => !saved_neg,
+                            crate::Direction::Positive => saved_neg,
+                        };
+                        let magnitude = if pure_symmetric {
+                            neg.max(pos)
+                        } else if travel_negative {
+                            neg
+                        } else {
+                            pos
+                        };
+                        // Pointing away from the model (sketched on its far face, say): nothing lies that
+                        // way, so keep the margined reach instead of refusing valid input.
+                        let magnitude = if !pure_symmetric && !(magnitude > 0.0) {
+                            through_all_distance(st, &ss.plane, start, &crate::plain(targets))?
+                        } else {
+                            magnitude
+                        };
+                        through_all_side(magnitude, val(vals, &extent.distance, Kind::Length).ok())
+                    } else {
+                        let reach = through_all_distance(st, &ss.plane, start, &crate::plain(targets))?;
+                        through_all_side(reach, val(vals, &extent.distance, Kind::Length).ok())
+                    }
                 }
                 (None, _) => val(vals, &extent.distance, Kind::Length)?,
             };
@@ -13756,6 +13805,17 @@ fn feature_tools_with_constructor(
             };
             // A negative distance flips the side.
             let (mut lo, mut hi) = if a <= b { (a, b) } else { (b, a) };
+            if *operation == Operation::Join
+                && extent.through_all
+                && extent.through_all_to_corner
+                && direction == crate::Direction::Symmetric
+                && extent.distance2.is_none()
+                && extent.to.is_none()
+            {
+                let (neg, pos) = through_all_side_reaches(st, &ss.plane, off, &crate::plain(targets))?;
+                lo = -neg;
+                hi = pos;
+            }
             // To a curved (or slanted) face: run right through the target body, then keep what
             // lies before that face's surface, offset by the To offset along the travel
             // (`trim_to_face`, #12617). An end the offset carries back across the start, away from
@@ -17059,13 +17119,13 @@ fn with_named_face_points(doc: &Document, vals: &BTreeMap<String, Value>, state:
         }
         let from = if k == 0 { placed.unwrap_or(*p) } else { *p };
         let scoped;
-        let input = if let Some(body) = f.kind.thread_target_body(k) {
+        let input = if let Some(body) = f.kind.face_slot_body(k) {
             scoped = ModelState { bodies: fst.bodies.iter().filter(|b| b.name == body).cloned().collect(), ..ModelState::default() };
             &scoped
         } else {
             &fst
         };
-        let body = f.kind.thread_target_body(k).or_else(|| f.kind.face_body());
+        let body = f.kind.face_slot_body(k).or_else(|| f.kind.face_body());
         // Only a thread may find a numbered piece of a round side again as its whole face (#16602).
         let hit = if let FeatureKind::TransformFace { body, .. } = &f.kind {
             crate::name_lookup::locate_owned_face(input, body, n, from)
@@ -20013,6 +20073,8 @@ fn eval_feature_kind(
         | FeatureKind::Stitch { .. }
         | FeatureKind::Thicken { .. }
         | FeatureKind::SurfaceTrim { .. }
+        | FeatureKind::SurfaceFillet { .. }
+        | FeatureKind::SurfaceChamfer { .. }
         | FeatureKind::SurfaceExtend { .. }
         | FeatureKind::SurfaceExtrude { .. }
         | FeatureKind::Unstitch { .. }
@@ -22371,11 +22433,11 @@ pub fn face_point_names(doc: &Document, st: &ModelState, kind: &FeatureKind, com
         }
         return Ok(names);
     }
-    if thread_target_bodies(doc, st, kind)?.is_some() {
+    if matches!(kind, FeatureKind::SurfaceFillet { .. } | FeatureKind::SurfaceChamfer { .. }) || thread_target_bodies(doc, st, kind)?.is_some() {
         let mut names = Vec::with_capacity(pts.len());
         for (slot, point) in pts.iter().enumerate() {
             let scoped;
-            let input = if let Some(body) = kind.thread_target_body(slot) {
+            let input = if let Some(body) = kind.face_slot_body(slot) {
                 scoped = ModelState { bodies: st.bodies.iter().filter(|b| b.name == body).cloned().collect(), ..ModelState::default() };
                 &scoped
             } else {

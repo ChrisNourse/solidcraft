@@ -4815,6 +4815,113 @@ fn a_boss_overhanging_a_frustums_rim_by_exactly_the_tolerance_joins() {
     );
 }
 
+/// #22816 (stress corpus S7573): a frustum of the same radii with its top rim rounded by a variable
+/// radius, 0.14 at (1, 0, 3) rising linearly to 0.28 half way round and back (SolidCraft's
+/// `type: variable` with `mid: [[0.5, 0.28]]`), less a Ø0.2 hole 0.8 deep from the top whose
+/// rim runs across the round. The hole at (0, -0.85) failed ("the traced UV control polygon
+/// is not proved inside the surface domain"): the drop of the round's tangent edge on the top
+/// face onto the round clamped its ends onto the round's boundary, and the UV tangent kept
+/// across that boundary put a control point of the span outside the domain, by 2e-16 here
+/// and by 7e-7 for the hole at (-0.8, 0.3). The mirror holes at (0, 0.85) and (-0.8, -0.3)
+/// built. Each cut is one valid solid (Level 2), and by the part's mirror symmetry in y (the
+/// law takes the same radius at angles θ and -θ) each hole's volume is its mirror's. Both
+/// lie between the closed forms that bound them: the frustum 7π, less the rim's constant
+/// round of 0.28 (0.14), the corner's area r²(cot(α/2) - (π - α)/2) (α the rim's angle,
+/// cos α = -1/√10) turned about z at its centroid (Pappus), and less the hole's column
+/// through z 2.2..3 (through z 2.2..2.72, below every round).
+#[test]
+#[allow(clippy::disallowed_methods)] // the test's operands and closed form, not ops geometry
+fn a_hole_through_a_variable_round_on_a_frustums_rim_cuts_on_either_side() {
+    all_fixes();
+    // the frustum as SolidCraft's cone makes it: its half section turned about -z, which
+    // runs the rim's parameter, and the round's, clockwise from the seam at +x
+    let line = |a: [f64; 3], b: [f64; 3]| Curve::Line { start: a, end: b };
+    let section = [
+        line([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+        line([2.0, 0.0, 0.0], [1.0, 0.0, 3.0]),
+        line([1.0, 0.0, 3.0], [0.0, 0.0, 3.0]),
+        line([0.0, 0.0, 3.0], [0.0, 0.0, 0.0]),
+    ];
+    let rounded = || {
+        let b = round_tripped(&revolve(&section, [0.0; 3], [0.0, 0.0, -1.0], TAU, true).unwrap());
+        let rim = solidcore_ops::pick::edges(&b, &[[0.0, -1.0, 3.0]], 1e-6)
+            .unwrap()
+            .unwrap();
+        solidcore_ops::fillet_variable_from(
+            &b,
+            rim[0],
+            [1.0, 0.0, 3.0],
+            1,
+            &[0.0, 0.0, 0.5, 1.0, 1.0],
+            &[0.14, 0.28, 0.14],
+        )
+        .unwrap();
+        round_tripped(&b)
+    };
+    // the round removed from the rim (1, 3) at radius r, turned about z at its centroid
+    let alpha = (-1.0 / 10.0_f64.sqrt()).acos();
+    let removed = |r: f64| {
+        let t = r / (alpha / 2.0).tan();
+        let (u1, u2) = ([-1.0, 0.0], [1.0 / 10.0_f64.sqrt(), -3.0 / 10.0_f64.sqrt()]);
+        let bis = [u1[0] + u2[0], u1[1] + u2[1]];
+        let n = bis[0].hypot(bis[1]);
+        let d = r / (alpha / 2.0).sin();
+        let c = [1.0 + bis[0] / n * d, 3.0 + bis[1] / n * d];
+        // the corner, the two tangent points and the arc between them, as a polygon fine
+        // enough that its centroid is the region's to far below the bounds' slack
+        let a1 = (3.0 - c[1]).atan2(1.0 - t - c[0]);
+        let a2 = (3.0 + u2[1] * t - c[1]).atan2(1.0 + u2[0] * t - c[0]);
+        let da = (a2 - a1 + PI).rem_euclid(TAU) - PI;
+        let mut pts = vec![[1.0, 3.0], [1.0 - t, 3.0]];
+        pts.extend((1..4000).map(|k| {
+            let a = a1 + da * f64::from(k) / 4000.0;
+            [c[0] + r * a.cos(), c[1] + r * a.sin()]
+        }));
+        pts.push([1.0 + u2[0] * t, 3.0 + u2[1] * t]);
+        let (mut area, mut moment) = (0.0, 0.0);
+        for (p, q) in pts.iter().zip(pts.iter().cycle().skip(1)) {
+            let cross = p[0] * q[1] - q[0] * p[1];
+            area += cross / 2.0;
+            moment += (p[0] + q[0]) * cross / 6.0;
+        }
+        let closed = r * r * (1.0 / (alpha / 2.0).tan() - (PI - alpha) / 2.0);
+        assert!(
+            (area.abs() - closed).abs() <= 1e-6 * closed,
+            "{area} {closed}"
+        );
+        TAU * moment.abs()
+    };
+    let column = |h: f64| PI * 0.1 * 0.1 * h;
+    let frustum = 7.0 * PI;
+    let (low, high) = (
+        frustum - removed(0.28) - column(0.8),
+        frustum - removed(0.14) - column(0.52),
+    );
+    for [x, y] in [[0.0, 0.85], [-0.8, 0.3]] {
+        let mut volumes = Vec::new();
+        for side in [-1.0, 1.0] {
+            let hole = round_tripped(&rod([x, side * y, 2.2], 0.1, 0.8));
+            let cut = boolean(rounded(), hole, BooleanOp::Subtract)
+                .unwrap_or_else(|e| panic!("({x}, {}): {e:?}", side * y))
+                .unwrap();
+            let report = cut.check(CheckLevel::All).unwrap();
+            assert!(report.is_valid(), "({x}, {}): {}", side * y, report.text);
+            assert_eq!(cut.solid_count().unwrap(), 1, "({x}, {})", side * y);
+            let v = volume(&cut);
+            assert!(
+                low < v && v < high,
+                "({x}, {}): {v} not in {low}..{high}",
+                side * y
+            );
+            volumes.push(v);
+        }
+        assert!(
+            near(volumes[0], volumes[1]),
+            "({x}, ±{y}): {volumes:?} differ by more than the mirror allows"
+        );
+    }
+}
+
 /// #18274: the r 2 ball cut flat at z 1.2 (a cap edge of radius 1.6), less a notch of radius
 /// 0.19 from z -0.4 up to the cap, centred on the cap's edge just off the ball's seam meridian
 /// so that its side passes `d` outside the corner (1.6, 0, 1.2) where the seam meets the cap's
@@ -6167,5 +6274,161 @@ fn faceted_sphere_plane_split_produces_both_halves() {
         (pos_vol + neg_vol - full_vol).abs() < 1e-6,
         "sum {} != full {full_vol}",
         pos_vol + neg_vol
+    );
+}
+
+/// Two 9 mm-diameter circular tubes meeting end-to-end across a shared planar cut at z = 0:
+/// both coaxial (0 deg tilt) and with the first tube tilted 1 deg so its cut cap is a nearly
+/// circular ellipse grazing the second tube's circular start cap. Joining them via `boolean`,
+/// `union_copies`, and `union_all` produces a single valid solid whose volume is the sum.
+#[test]
+fn coincident_tubes_on_shared_cut_plane_join_cleanly() {
+    all_fixes();
+    let radius = 4.5;
+    for (tilt_deg, s, c) in [
+        (0.0_f64, 0.0_f64, 1.0_f64),
+        (
+            1.0_f64,
+            0.017_452_406_437_283_51_f64,
+            0.999_847_695_156_391_3_f64,
+        ),
+    ] {
+        let make_pair = || {
+            let tube_a = if tilt_deg == 0.0 {
+                solidcore_ops::make_cylinder([0.0, 0.0, -20.0], radius, 20.0).unwrap()
+            } else {
+                let raw = solidcore_ops::make_cylinder([0.0, 0.0, -25.0], radius, 30.0).unwrap();
+                raw.transform(&[
+                    [c, 0.0, -s, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [s, 0.0, c, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ])
+                .unwrap();
+                let cut_halfspace = make_box([-20.0, -20.0, 0.0], [40.0, 40.0, 20.0]).unwrap();
+                boolean(raw, cut_halfspace, BooleanOp::Subtract)
+                    .unwrap()
+                    .unwrap()
+            };
+            let tube_b = solidcore_ops::make_cylinder([0.0, 0.0, 0.0], radius, 20.0).unwrap();
+            (tube_a, tube_b)
+        };
+
+        let (a0, b0) = make_pair();
+        let expected_vol = volume(&a0) + volume(&b0);
+
+        let via_copies = union_copies(&a0, &b0)
+            .unwrap_or_else(|e| panic!("tilt {tilt_deg} deg union_copies: {e:?}"))
+            .unwrap();
+        assert_eq!(via_copies.solid_count().unwrap(), 1, "tilt {tilt_deg} deg");
+        assert!(
+            via_copies.check(CheckLevel::All).unwrap().is_valid(),
+            "tilt {tilt_deg} deg union_copies check"
+        );
+        assert!(
+            (volume(&via_copies) - expected_vol).abs() <= 1e-5 * expected_vol,
+            "tilt {tilt_deg} deg union_copies: {} vs {expected_vol}",
+            volume(&via_copies)
+        );
+
+        let (a1, b1) = make_pair();
+        let via_boolean = boolean(a1, b1, BooleanOp::Union)
+            .unwrap_or_else(|e| panic!("tilt {tilt_deg} deg boolean: {e:?}"))
+            .unwrap();
+        assert_eq!(via_boolean.solid_count().unwrap(), 1, "tilt {tilt_deg} deg");
+        assert!(
+            via_boolean.check(CheckLevel::All).unwrap().is_valid(),
+            "tilt {tilt_deg} deg boolean check"
+        );
+        assert!(
+            (volume(&via_boolean) - expected_vol).abs() <= 1e-5 * expected_vol,
+            "tilt {tilt_deg} deg boolean: {} vs {expected_vol}",
+            volume(&via_boolean)
+        );
+
+        let (a2, b2) = make_pair();
+        let via_all = union_all(vec![a2, b2])
+            .unwrap_or_else(|e| panic!("tilt {tilt_deg} deg union_all: {e:?}"));
+        assert_eq!(via_all.solid_count().unwrap(), 1, "tilt {tilt_deg} deg");
+        assert!(
+            via_all.check(CheckLevel::All).unwrap().is_valid(),
+            "tilt {tilt_deg} deg union_all check"
+        );
+        assert!(
+            (volume(&via_all) - expected_vol).abs() <= 1e-5 * expected_vol,
+            "tilt {tilt_deg} deg union_all: {} vs {expected_vol}",
+            volume(&via_all)
+        );
+    }
+}
+
+/// Issue #21113: a symmetric hollow cylindrical enclosure with two curved-wall-flush tabs
+/// already joined on the +X inner wall joins the YZ-mirrored copies of both tabs onto the
+/// opposite (-X) curved inner wall cleanly via `boolean`, `union_copies`, and `union_all`.
+#[test]
+fn mirrored_tabs_join_opposite_curved_wall_of_hollow_cylinder() {
+    all_fixes();
+    let mirror_yz = [
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let make_tab = |y0: f64| {
+        let outer = solidcore_ops::make_cylinder([0.0, 0.0, 4.0], 25.0, 12.0).unwrap();
+        let inner = solidcore_ops::make_cylinder([0.0, 0.0, 3.0], 20.0, 14.0).unwrap();
+        let ring = boolean(outer, inner, BooleanOp::Subtract).unwrap().unwrap();
+        let clip = make_box([15.0, y0, 4.0], [12.0, 8.0, 12.0]).unwrap();
+        boolean(ring, clip, BooleanOp::Intersect).unwrap().unwrap()
+    };
+    let make_inputs = || {
+        let outer = solidcore_ops::make_cylinder([0.0, 0.0, 0.0], 30.0, 20.0).unwrap();
+        let inner = solidcore_ops::make_cylinder([0.0, 0.0, -1.0], 25.0, 22.0).unwrap();
+        let housing = boolean(outer, inner, BooleanOp::Subtract).unwrap().unwrap();
+        let seed_upper = make_tab(4.0);
+        let seed_lower = make_tab(-12.0);
+        let with_seeds = union_all(vec![housing, seed_upper, seed_lower]).unwrap();
+        let mirror_upper = make_tab(4.0);
+        mirror_upper.transform(&mirror_yz).unwrap();
+        let mirror_lower = make_tab(-12.0);
+        mirror_lower.transform(&mirror_yz).unwrap();
+        (with_seeds, mirror_upper, mirror_lower)
+    };
+
+    let (base0, m1_0, m2_0) = make_inputs();
+    let expected_vol = volume(&base0) + volume(&m1_0) + volume(&m2_0);
+
+    // 1. Sequential `union_copies`
+    let step1 = union_copies(&base0, &m1_0).unwrap().unwrap();
+    let via_copies = union_copies(&step1, &m2_0).unwrap().unwrap();
+    assert_eq!(via_copies.solid_count().unwrap(), 1);
+    assert!(via_copies.check(CheckLevel::All).unwrap().is_valid());
+    assert!(
+        (volume(&via_copies) - expected_vol).abs() <= 1e-5 * expected_vol,
+        "union_copies: {} vs {expected_vol}",
+        volume(&via_copies)
+    );
+
+    // 2. Sequential `boolean`
+    let (base1, m1_1, m2_1) = make_inputs();
+    let step1 = boolean(base1, m1_1, BooleanOp::Union).unwrap().unwrap();
+    let via_boolean = boolean(step1, m2_1, BooleanOp::Union).unwrap().unwrap();
+    assert_eq!(via_boolean.solid_count().unwrap(), 1);
+    assert!(via_boolean.check(CheckLevel::All).unwrap().is_valid());
+    assert!(
+        (volume(&via_boolean) - expected_vol).abs() <= 1e-5 * expected_vol,
+        "boolean: {} vs {expected_vol}",
+        volume(&via_boolean)
+    );
+
+    // 3. Batched `union_all`
+    let (base2, m1_2, m2_2) = make_inputs();
+    let via_all = union_all(vec![base2, m1_2, m2_2]).unwrap();
+    assert_eq!(via_all.solid_count().unwrap(), 1);
+    assert!(via_all.check(CheckLevel::All).unwrap().is_valid());
+    assert!(
+        (volume(&via_all) - expected_vol).abs() <= 1e-5 * expected_vol,
+        "union_all: {} vs {expected_vol}",
+        volume(&via_all)
     );
 }

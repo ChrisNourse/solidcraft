@@ -417,6 +417,7 @@ impl Builder {
                 // The PR was written before these: no second side follows the first (the
                 // FreeCAD two-sided extent is one side each way), no taper, no join apart.
                 second_follows_first: false,
+                through_all_to_corner: through,
                 corner: None,
                 to_body_apart: false,
                 through_all2: false,

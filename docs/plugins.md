@@ -984,7 +984,9 @@ an ordered subset of that property's own `oneOf` constants, satisfying declarati
 conditions. The hook cannot add properties, change types, enable or reveal a declaratively
 unavailable field, or bypass the input schema. A malformed reply is ignored **whole** with a
 warning. Defaults and values must satisfy the field schema and the narrowed choices. Hints are
-at most 1024 bytes of printable text; input and reply are at most 1 MiB each.
+at most 1024 bytes of printable text; input and reply are at most 1 MiB each. A hint is drawn as
+a muted line under its field while the reply stands, and goes with a reply that leaves it out;
+the property's `description` stays the field's tooltip.
 
 Declarative conditions run first, then the validated patch, then the same input check used by
 programmatic calls. The hook never edits: it runs as a read entry, with no edit command or file

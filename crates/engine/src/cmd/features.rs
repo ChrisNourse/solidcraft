@@ -2001,6 +2001,7 @@ pub(super) fn extent_param(s: &Session, p: &Value, cmd: &str) -> Result<Extent> 
         symmetric_offset,
         through_all,
         second_follows_first: false,
+        through_all_to_corner: through_all,
         taper,
         taper2,
         corner,
