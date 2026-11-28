@@ -1507,3 +1507,165 @@ fn a_groove_across_a_bored_block_keeps_its_facets() {
     let source = welded.volume();
     assert_volume(&mut k, &mut { result.body }, source, source * 1e-8);
 }
+
+/// A 60 x 40 x 30 block with two bores along X (diameter 10, axes y = 13 and y = 27 at z = 15)
+/// and one along Y (diameter 6, axis x = 30, z = 15) that runs from the face y = 0 into the
+/// first and from the second out to y = 40, but not through the web between them: the first
+/// bore's wall facing y = 40 and the second's facing y = 0 are whole. Each X bore's wall is cut
+/// along X at 192 equal steps of angle, and at the two angles where its opening comes to a point.
+fn webbed_block() -> TriMesh {
+    let (big, small, axis_z) = (5., 3., 15.);
+    let mut mesh = TriMesh::default();
+    let mut rings = Vec::new();
+    let mut walls = Vec::new();
+    for (centre, near, end) in [(13., PI, 0.), (27., 0., 40.)] {
+        let on_bore = |p: Vec2| {
+            let angle = p.x / big;
+            Vec3::new(
+                p.y,
+                centre + big * det::cos(angle),
+                axis_z + big * det::sin(angle),
+            )
+        };
+        // The turn from the side the opening faces, within half a turn either way.
+        let turn = |angle: f64| (angle - near + PI).rem_euclid(TAU) - PI;
+        let mut angles: Vec<(f64, Option<f64>)> = (0..=192)
+            .map(|i| {
+                let angle = f64::from(i) * TAU / 192.;
+                let across = big * det::sin(angle);
+                let opening = (turn(angle).abs() < FRAC_PI_2 && across.abs() < small)
+                    .then(|| (det::powi(small, 2) - det::powi(across, 2)).sqrt());
+                (angle, opening)
+            })
+            .collect();
+        let tip = det::asin(small / big);
+        angles.extend([near - tip, near + tip].map(|angle| (angle.rem_euclid(TAU), Some(0.))));
+        angles.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (&(a, at_a), &(b, at_b)) in angles.iter().zip(angles.iter().skip(1)) {
+            let (a, b) = (a * big, b * big);
+            if let (Some(wa), Some(wb)) = (at_a, at_b) {
+                let low = [(a, 0.), (b, 0.), (b, 30. - wb), (a, 30. - wa)];
+                let high = [(a, 30. + wa), (b, 30. + wb), (b, 60.), (a, 60.)];
+                for piece in [low, high] {
+                    let outline = piece.map(|(s, x)| Vec2::new(s, x)).to_vec();
+                    patch(&mut mesh, &[outline], on_bore);
+                }
+            } else {
+                let point = |s: f64, opening: Option<f64>| opening.map(|_| Vec2::new(s, 30.));
+                let mut outline = vec![Vec2::new(a, 0.), Vec2::new(b, 0.)];
+                outline.extend(point(b, at_b));
+                outline.extend([Vec2::new(b, 60.), Vec2::new(a, 60.)]);
+                outline.extend(point(a, at_a));
+                patch(&mut mesh, &[outline], on_bore);
+            }
+        }
+        rings.push(
+            angles
+                .iter()
+                .skip(1)
+                .map(|&(angle, _)| angle * big)
+                .collect::<Vec<_>>(),
+        );
+        let mut opening: Vec<_> = angles
+            .iter()
+            .skip(1)
+            .filter_map(|&(angle, w)| {
+                w.filter(|_| turn(angle).abs() < FRAC_PI_2)
+                    .map(|w| (turn(angle), angle, w))
+            })
+            .collect();
+        opening.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut rim: Vec<_> = opening
+            .iter()
+            .map(|&(_, angle, w)| on_bore(Vec2::new(angle * big, 30. - w)))
+            .collect();
+        rim.extend(
+            opening
+                .iter()
+                .rev()
+                .filter(|&&(_, _, w)| w > 0.)
+                .map(|&(_, angle, w)| on_bore(Vec2::new(angle * big, 30. + w))),
+        );
+        walls.push((rim, end));
+    }
+    for x in [0., 60.] {
+        let mut outlines = vec![rectangle(0., 0., 40., 30.).to_vec()];
+        for (ring, centre) in rings.iter().zip([13., 27.]) {
+            outlines.push(
+                ring.iter()
+                    .map(|&s| {
+                        let angle = s / big;
+                        Vec2::new(
+                            centre + big * det::cos(angle),
+                            axis_z + big * det::sin(angle),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        patch(&mut mesh, &outlines, |p| Vec3::new(x, p.x, p.y));
+    }
+    for (rim, end) in walls {
+        let far: Vec<_> = rim.iter().map(|p| Vec3::new(p.x, end, p.z)).collect();
+        let offset = u32::try_from(mesh.positions.len()).unwrap();
+        let n = u32::try_from(rim.len()).unwrap();
+        mesh.positions.extend(rim.iter().chain(&far));
+        for i in 0..n {
+            let j = (i + 1) % n;
+            mesh.triangles.extend([
+                [offset + i, offset + j, offset + n + j],
+                [offset + i, offset + n + j, offset + n + i],
+            ]);
+        }
+        let hole = far.iter().map(|p| Vec2::new(p.x, p.z)).collect();
+        patch(
+            &mut mesh,
+            &[rectangle(0., 0., 60., 30.).to_vec(), hole],
+            |p| Vec3::new(p.x, end, p.y),
+        );
+    }
+    for z in [0., 30.] {
+        patch(&mut mesh, &[rectangle(0., 0., 60., 40.).to_vec()], |p| {
+            Vec3::new(p.x, p.y, z)
+        });
+    }
+    mesh
+}
+
+/// The block of [`webbed_block`] is no intersection of extrusions: its Y section has the bore
+/// through, so the extrusions' intersection has no web. The web is the Y bore's disk (radius 3)
+/// times the gap between the X bores' walls, 14 - 2 sqrt(25 - t²) at height t from their axes:
+/// 14 · 9π less [`crossing_cylinders_volume`]`(5, 3)`, about 130 mm3, less than the source's
+/// area times the tolerance (over 10000 mm2 times 0.05), so the volume certificate alone would
+/// take the solid without it. Every source vertex lies inside every extrusion and every
+/// triangle on one's cap or wall, but the walls over the web run through the Y bore's hole, so
+/// the source keeps its facets.
+#[test]
+fn a_web_across_a_bore_between_two_others_keeps_its_facets() {
+    let web = 14. * 9. * PI - crossing_cylinders_volume(5., 3.);
+    assert!(web > 100. && web < 10000. * 0.05, "{web}");
+    let mesh = webbed_block();
+    let mut k = Kernel::default();
+    let welded = weld(&mesh.positions, &mesh.triangles, 0.05).unwrap();
+    // Every extrusion is read, so what refuses the solid is the triangles' certificate.
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        assert!(super::prism(&mut k, &welded, axis, 0.05, Sides::Any)
+            .unwrap()
+            .is_some());
+    }
+    let mut refused = crossed::reconstruct(&mut k, &welded, 0.05).unwrap();
+    let built = match &mut refused {
+        Ok(body) => native::volume(&mut k, body).unwrap(),
+        Err(_) => None,
+    };
+    assert!(
+        matches!(refused, Err(crossed::Refused::NotAnIntersection)),
+        "{:?}, built volume {built:?} of the source's {}",
+        refused.as_ref().err(),
+        welded.volume()
+    );
+    let result = reconstruct(&mut k, &mesh.positions, &mesh.triangles, 0.05).unwrap();
+    assert_eq!(result.kind, ReconstructionKind::Faceted);
+    let source = welded.volume();
+    assert_volume(&mut k, &mut { result.body }, source, source * 1e-8);
+}
