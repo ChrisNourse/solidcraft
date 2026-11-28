@@ -3803,6 +3803,25 @@ mod tests {
         assert!(trimmed < 40.0 * 20.0 * 0.9, "the sheet is trimmed: {trimmed}");
     }
 
+    /// #23659: two L-shaped walls whose top edges close one square, each pick on its own wall
+    /// and the patch asked on the first: the walls are sewn for the fill and left as they were.
+    #[test]
+    fn patch_fills_a_loop_picked_across_two_surfaces() {
+        let mut s = Session::default();
+        for (name, pts) in [("A", json!([[0, 0], [10, 0], [10, 10]])), ("B", json!([[10, 10], [0, 10], [0, 0]]))] {
+            run(&mut s, "sketch.create", json!({"plane": "XY", "name": name}));
+            let curves = run(&mut s, "sketch.line", json!({"points": pts}))["created"]["curves"].clone();
+            run(&mut s, "sketch.finish", json!({}));
+            run(&mut s, "surface.extrude", json!({"sketch": name, "curves": curves, "distance": 5, "body_name": format!("Wall{name}")}));
+        }
+        let rim = json!([[5, 0, 5], [10, 5, 5], [5, 10, 5], [0, 5, 5]]);
+        run(&mut s, "surface.patch", json!({"edges": rim, "body": "WallA", "body_name": "Lid"}));
+        let st = s.world_state().unwrap();
+        let lid = &st.body("Lid").unwrap().body;
+        assert!(lid.is_surface() && lid.face_count() == 1);
+        assert!(st.body("WallA").is_some() && st.body("WallB").is_some());
+    }
+
     /// A rectangle patched, trimmed by a plane and thickened; a box's open top patched; a rim
     /// that is not planar patched.
     #[test]

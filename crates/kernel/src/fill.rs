@@ -101,6 +101,46 @@ pub fn patch_edges_with(body: &Body, at: &[Vec3], spec: &PatchSpec) -> Result<Bo
     patch_edges_report(body, at, spec).map(|(b, _)| b)
 }
 
+/// [`patch_edges_with`] on a loop whose picks may lie on several surfaces (each surface of a ring
+/// made by separate blends, #23659). `bodies[0]` is the body the patch names; the others are the
+/// surfaces a pick may also lie on. When some pick lies on an edge of another surface and not of
+/// the first, those surfaces and the first are sewn together (tolerance 0) and the loop is filled
+/// on that; otherwise, or with per-edge continuity (whose edges are the first body's), on the first.
+pub fn patch_edges_across(bodies: &[&Body], at: &[Vec3], spec: &PatchSpec) -> Result<Body> {
+    let first = *bodies.first().ok_or_else(|| KernelError::Invalid("a patch needs a body".into()))?;
+    if spec.edges.is_empty()
+        && let Some(owners) = loop_owners(bodies, at)
+    {
+        let parts: Vec<&Body> = owners.iter().filter_map(|k| bodies.get(*k).copied()).collect();
+        let joined = crate::surfaces::stitch(&parts, 0.0)?;
+        return patch_edges_with(&joined, at, spec);
+    }
+    patch_edges_with(first, at, spec)
+}
+
+/// The bodies (indices into `bodies`, the first among them) holding the edges picked at `at`,
+/// when some pick is on another body than the first; `None` when every pick is on the first, or
+/// one is on none (the fill then reports it).
+fn loop_owners(bodies: &[&Body], at: &[Vec3]) -> Option<Vec<usize>> {
+    // A pick within ten times the drawing tolerance of an edge's polyline lies on that edge.
+    let on = |b: &Body, p: Vec3| -> Option<f64> {
+        let tol = (b.size() * 1e-4).max(1e-6);
+        b.nearest_edge(p, tol).ok().flatten().map(|(_, d)| d).filter(|d| *d <= tol * 10.0)
+    };
+    let first = bodies.first()?;
+    let mut owners = vec![0];
+    for p in at {
+        if on(first, *p).is_some() {
+            continue;
+        }
+        let (k, _) = bodies.iter().enumerate().skip(1).filter_map(|(k, b)| on(b, *p).map(|d| (k, d))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if !owners.contains(&k) {
+            owners.push(k);
+        }
+    }
+    (owners.len() > 1).then_some(owners)
+}
+
 /// [`patch_edges_with`] and what the fill achieved.
 pub fn patch_edges_report(body: &Body, at: &[Vec3], spec: &PatchSpec) -> Result<(Body, PatchReport)> {
     if at.is_empty() || at.len() > 10_000 {

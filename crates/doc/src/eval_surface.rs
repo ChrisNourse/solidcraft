@@ -37,7 +37,11 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                     points: crate::plain(points),
                     crown: *crown,
                 };
-                made.push(kernel::patch_edges_with(&b.body, &crate::plain(edges), &spec)?);
+                // The loop's picks may also lie on the other surfaces (#23659): the kernel sews
+                // the ones they lie on to the named body for the fill.
+                let others = st.bodies.iter().enumerate().filter(|(k, o)| *k != i && o.body.is_surface()).map(|(_, o)| &o.body);
+                let bodies: Vec<&kernel::Body> = std::iter::once(&b.body).chain(others).collect();
+                made.push(kernel::patch_edges_across(&bodies, &crate::plain(edges), &spec)?);
             }
             if made.is_empty() {
                 return Err(DocError::Invalid("a patch needs a sketch region, a 3D sketch loop, or a loop of edges".into()));

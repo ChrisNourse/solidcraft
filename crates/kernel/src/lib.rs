@@ -355,6 +355,7 @@ pub use fair::fair_surface;
 pub use fill::PATCH_ANGLE_TOL_DEG;
 pub use fill::PatchReport;
 pub use fill::PatchSpec;
+pub use fill::patch_edges_across;
 pub use fill::patch_edges_crowned;
 pub use fill::patch_edges_report;
 pub use fill::patch_edges_with;
