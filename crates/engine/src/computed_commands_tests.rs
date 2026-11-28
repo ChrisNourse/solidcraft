@@ -312,9 +312,7 @@ fn a_parameter_added_while_the_editor_is_open_keeps_the_edit() {
 fn cancelling_after_a_parameter_was_added_keeps_the_parameter() {
     let (mut session, source, original, _commands) = extrusion_editor();
     session.execute("parameters.add", &json!({"name": "len", "expression": "20 mm"})).unwrap();
-    session
-        .restore_editor(&source, original)
-        .unwrap_or_else(|error| panic!("the editor refused the cancel: {error}"));
+    session.restore_editor(&source, original).unwrap_or_else(|error| panic!("the editor refused the cancel: {error}"));
     assert!(session.doc.params.iter().any(|param| param.name == "len"), "the design keeps the parameter");
     assert_editor_volume(&mut session, 6024.0);
 }
