@@ -27,7 +27,7 @@ use super::profile::{
 use super::read::{
     arc_before_line, circular_boundary, planar_curves, planar_pieces, PlanarPiece, Run,
 };
-use super::sheet::{region_loops, sheet_regions};
+use super::sheet::{region_loops, sheet_regions, weld_lines};
 use crate::boolean::api_brep::{boolean_2d, Boolean2dOutcome};
 use crate::curve::curve::{Curve, CurveKind};
 use crate::eval::Frame;
@@ -1428,6 +1428,109 @@ fn sheet(k: &mut Kernel, region: &Region2, tol: f64) -> Brep {
         acc = combine(k, acc, f, Boolean2d::Union).unwrap();
     }
     acc
+}
+
+/// A line ending a hair from an arc's start is welded onto the arc only when the move fits the
+/// line's own tolerance: a looser arc does not pull a tighter line off its curve. Two lines
+/// meet at their shared vertex.
+#[test]
+fn a_line_is_welded_no_further_than_its_own_tolerance() {
+    let gap = 5e-6;
+    let line = Seg2::Line {
+        a: p(0.0, 0.0),
+        b: p(10.0, 0.0),
+    };
+    // a half circle from (10, gap) back to (0, gap), over the line
+    let arc = Seg2::Arc {
+        center: p(5.0, gap),
+        radius: 5.0,
+        start: 0.0,
+        sweep: PI,
+    };
+    let corners = [None, Some(p(10.0, 0.0))];
+    // the line read at 1e-7, the arc at 1e-5: the 5e-6 move is fifty times the line's
+    let mut segs = [(None, line), (None, arc)];
+    weld_lines(&mut segs, &corners, &[1e-7, 1e-5]);
+    assert_eq!(segs[0].1, line, "{segs:?}");
+    assert_eq!(segs[1].1, arc);
+    // the line read at 1e-5 too: it ends on the arc's start, moved by the gap
+    let mut segs = [(None, line), (None, arc)];
+    weld_lines(&mut segs, &corners, &[1e-5, 1e-5]);
+    assert_eq!(segs[0].1.end(), arc.start(), "{segs:?}");
+    assert!(segs[0].1.end().distance(p(10.0, 0.0)) <= 1e-5);
+    assert_eq!(segs[1].1, arc);
+    // two lines a hair apart meet at their vertex, each moved within its tolerance
+    let up = Seg2::Line {
+        a: p(10.0, gap),
+        b: p(10.0, 10.0),
+    };
+    let vertex = p(10.0, gap / 2.0);
+    let mut segs = [(None, line), (None, up)];
+    weld_lines(&mut segs, &[None, Some(vertex)], &[1e-5, 1e-5]);
+    assert_eq!((segs[0].1.end(), segs[1].1.start()), (vertex, vertex));
+    let mut segs = [(None, line), (None, up)];
+    weld_lines(&mut segs, &[None, Some(vertex)], &[1e-5, 1e-7]);
+    assert_eq!((segs[0].1, segs[1].1), (line, up), "{segs:?}");
+}
+
+/// A join left open because the weld would move a line further than its tolerance does not
+/// decide the loop's turning: its area is the same wherever the loop lies. A thin strip whose
+/// line meets its arc 5e-6 apart, placed at the origin and 1000 mm along x.
+#[test]
+fn a_loop_left_open_by_the_weld_has_the_same_area_wherever_it_lies() {
+    let gap = 5e-6;
+    let top = gap + 1e-4;
+    let mut areas = Vec::new();
+    for x in [0.0, 1000.0] {
+        let mut segs = [
+            (
+                None,
+                Seg2::Line {
+                    a: p(x, 0.0),
+                    b: p(x + 10.0, 0.0),
+                },
+            ),
+            (
+                None,
+                Seg2::Arc {
+                    center: p(x + 9.9999, gap),
+                    radius: 1e-4,
+                    start: 0.0,
+                    sweep: FRAC_PI_2,
+                },
+            ),
+            (
+                None,
+                Seg2::Line {
+                    a: p(x + 9.9999, top),
+                    b: p(x, top),
+                },
+            ),
+            (
+                None,
+                Seg2::Line {
+                    a: p(x, top),
+                    b: p(x, 0.0),
+                },
+            ),
+        ];
+        let corners = [Some(p(x, 0.0)), Some(p(x + 10.0, 0.0)), None, None];
+        weld_lines(&mut segs, &corners, &[1e-7, 1e-5, 1e-7, 1e-7]);
+        // the line is not moved onto the arc: the loop stays open there
+        assert_eq!(segs[0].1.end(), p(x + 10.0, 0.0));
+        let lp = Loop2 {
+            segs: segs.iter().map(|(_, s)| *s).collect(),
+        };
+        assert!(!lp.is_closed(1e-9));
+        let area = lp.signed_area().unwrap();
+        assert_eq!(area.sign(), Some(true), "at x = {x}: {area:?}");
+        areas.push(area.value);
+    }
+    // the strip less the corner the quarter circle cuts off
+    let want = 10.0 * top - 1e-4 * 1e-4 * (1.0 - PI / 4.0);
+    for a in areas {
+        assert!((a - want).abs() < 1e-9, "{a} against {want}");
+    }
 }
 
 #[test]

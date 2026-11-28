@@ -104,18 +104,29 @@ pub fn region_loops(region: &Region2, tol: f64) -> Result<RegionLoops> {
 /// is a curve (whose ends its curve fixes) and onto the vertex where both are lines. A boolean
 /// that merges a vertex with a corner a hair away keeps each edge's curve and moves the vertex,
 /// so the curves of two edges that share it end up to the edges' tolerance apart; read as they
-/// are, the loop is no longer closed at a finer tolerance (SolidCraft #23209). A line moved so
-/// stays within that tolerance of its curve. Lines that would shrink to a point stay as read.
-fn weld_lines(segs: &mut [(Option<VertexId>, Seg2)], corners: &[Option<Point2>]) {
+/// are, the loop is no longer closed at a finer tolerance (SolidCraft #23209). `tols` holds the
+/// tolerance each piece was read at (its edge's): a line end moves by no more than its own
+/// tolerance, so a line stays within it of its curve. A join that would move a line further (a
+/// line welded to a curve read at a looser tolerance) stays as read, and so do lines that would
+/// shrink to a point.
+pub(super) fn weld_lines(
+    segs: &mut [(Option<VertexId>, Seg2)],
+    corners: &[Option<Point2>],
+    tols: &[f64],
+) {
     let n = segs.len();
     for j in 0..n {
         let i = j.checked_sub(1).unwrap_or_else(|| n.saturating_sub(1));
         if i == j {
             continue;
         }
-        let (Some(Some(vertex)), Some((_, prev)), Some((_, next))) =
-            (corners.get(j), segs.get(i), segs.get(j))
-        else {
+        let (Some(Some(vertex)), Some((_, prev)), Some((_, next)), Some(&tol_i), Some(&tol_j)) = (
+            corners.get(j),
+            segs.get(i),
+            segs.get(j),
+            tols.get(i),
+            tols.get(j),
+        ) else {
             continue;
         };
         let (prev, next) = (*prev, *next);
@@ -130,6 +141,13 @@ fn weld_lines(segs: &mut [(Option<VertexId>, Seg2)], corners: &[Option<Point2>])
         };
         let keeps = |s: &Seg2, a: Point2, b: Point2| !matches!(s, Seg2::Line { .. }) || a != b;
         if !keeps(&prev, prev.start(), at) || !keeps(&next, at, next.end()) {
+            continue;
+        }
+        // a line end moves by at most the line's own tolerance
+        let within = |s: &Seg2, from: Point2, tol: f64| {
+            !matches!(s, Seg2::Line { .. }) || from.distance(at) <= tol
+        };
+        if !within(&prev, prev.end(), tol_i) || !within(&next, next.start(), tol_j) {
             continue;
         }
         if let Some((_, Seg2::Line { b, .. })) = segs.get_mut(i) {
@@ -178,6 +196,7 @@ pub fn sheet_regions(k: &Kernel, b: &Brep, frame: &Frame, tol: f64) -> Result<Sh
         let mut uses = loops.edges.iter().zip(&loops.orientations);
         for &count in &loops.edge_counts {
             let mut segs: Vec<(Option<VertexId>, Seg2)> = Vec::new();
+            let mut tols: Vec<f64> = Vec::new();
             for (&e, o) in uses.by_ref().take(count) {
                 let forward = matches!(o, OrientType::Same);
                 let ed = b.edge(e)?;
@@ -202,6 +221,7 @@ pub fn sheet_regions(k: &Kernel, b: &Brep, frame: &Frame, tol: f64) -> Result<Sh
                     .ok_or_else(|| refused("an edge not read exactly in the plane"))?;
                 // the first piece of the edge starts on the use's first vertex
                 let start = if forward { v0 } else { v1 };
+                tols.extend(std::iter::repeat_n(tol, read.len()));
                 segs.extend(
                     read.into_iter()
                         .enumerate()
@@ -218,7 +238,7 @@ pub fn sheet_regions(k: &Kernel, b: &Brep, frame: &Frame, tol: f64) -> Result<Sh
                     None => Ok(None),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            weld_lines(&mut segs, &corners);
+            weld_lines(&mut segs, &corners, &tols);
             for piece in simple_loops(segs, |a, b| a.is_some() && a == b) {
                 pieces.push(if up > 0.0 { piece } else { piece.reversed() });
             }
