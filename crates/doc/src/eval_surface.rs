@@ -37,7 +37,11 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                     points: crate::plain(points),
                     crown: *crown,
                 };
-                made.push(kernel::patch_edges_with(&b.body, &crate::plain(edges), &spec)?);
+                let at = crate::plain(edges);
+                // A loop picked across several surfaces (#23659) is filled on them sewn together.
+                // Per-edge continuity names edges of the one body, so it keeps that body.
+                let joined = if spec.edges.is_empty() { patch_loop_bodies(st, i, &at)? } else { None };
+                made.push(kernel::patch_edges_with(joined.as_ref().unwrap_or(&b.body), &at, &spec)?);
             }
             if made.is_empty() {
                 return Err(DocError::Invalid("a patch needs a sketch region, a 3D sketch loop, or a loop of edges".into()));
@@ -979,6 +983,40 @@ fn stays_a_surface(st: &mut ModelState, stays_surface: bool) {
     if stays_surface && let Some(made) = st.bodies.last_mut() {
         made.sheet = true;
     }
+}
+
+/// When a patch's edge picks lie on other surface bodies than body `i` (each surface of a loop
+/// made by separate blends, #23659), those bodies and `i` sewn together, so the fill finds the
+/// whole loop; `None` when every pick is on body `i`, or one is on no body (the fill reports it).
+fn patch_loop_bodies(st: &ModelState, i: usize, at: &[Vec3]) -> Result<Option<kernel::Body>> {
+    // A pick within ten times the drawing tolerance of an edge's polyline lies on that edge.
+    let on = |b: &ModelBody, p: Vec3| -> Option<f64> {
+        let tol = (b.body.size() * 1e-4).max(1e-6);
+        b.body.nearest_edge(p, tol).ok().flatten().map(|(_, d)| d).filter(|d| *d <= tol * 10.0)
+    };
+    let Some(first) = st.bodies.get(i) else { return Ok(None) };
+    let mut owners = vec![i];
+    for p in at {
+        if on(first, *p).is_some() {
+            continue;
+        }
+        let owner = st
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(k, b)| *k != i && b.body.is_surface())
+            .filter_map(|(k, b)| on(b, *p).map(|d| (k, d)))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((k, _)) = owner else { return Ok(None) };
+        if !owners.contains(&k) {
+            owners.push(k);
+        }
+    }
+    if owners.len() < 2 {
+        return Ok(None);
+    }
+    let refs: Vec<&kernel::Body> = owners.iter().filter_map(|k| st.bodies.get(*k).map(|b| &b.body)).collect();
+    Ok(Some(kernel::stitch(&refs, 0.0)?))
 }
 
 fn push_sheet(st: &mut ModelState, f: &Feature, traced: crate::lineage::Traced) {
