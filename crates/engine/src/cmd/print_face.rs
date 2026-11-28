@@ -551,6 +551,77 @@ mod tests {
         }
     }
 
+    /// How many sides of `triangles` are not shared by exactly two triangles running opposite
+    /// ways, corners compared as the file stores them: an open or non-manifold mesh has some.
+    fn unmatched_sides(triangles: &[[[f32; 3]; 3]]) -> usize {
+        // Adding 0 turns -0 into 0, so a corner on Z = 0 has one key.
+        let key = |p: [f32; 3]| p.map(|v| (v + 0.).to_bits());
+        let mut sides: std::collections::HashMap<([u32; 3], [u32; 3]), (usize, i64)> = std::collections::HashMap::new();
+        for t in triangles {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (a, b) = (key(a), key(b));
+                let side = sides.entry((a.min(b), a.max(b))).or_default();
+                side.0 += 1;
+                side.1 += if a < b { 1 } else { -1 };
+            }
+        }
+        sides.values().filter(|&&(uses, turn)| uses != 2 || turn != 0).count()
+    }
+
+    /// Every triangle of the STL or 3MF file at `path`, its corners as the file stores them.
+    fn mesh_triangles(path: &str) -> Vec<[[f32; 3]; 3]> {
+        let bytes = std::fs::read(path).expect("the mesh file");
+        if path.ends_with(".stl") {
+            return solidcraft_io::read_stl(&bytes).expect("an STL file");
+        }
+        let (objects, _) = solidcraft_io::read_3mf(&bytes).expect("a 3MF file");
+        objects
+            .iter()
+            .flat_map(|o| {
+                o.triangles.iter().map(|t| {
+                    t.map(|i| {
+                        let p = o.positions[i as usize];
+                        [p.x as f32, p.y as f32, p.z as f32]
+                    })
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_body_laid_on_its_print_face_is_written_as_a_closed_mesh() {
+        // A 3MF laid on its print face for a slicer had open and non-manifold sides where the
+        // same body written as it lies had none (#13151). Laying turns the exact body before it
+        // is meshed, so the file holds the same closed surface, turned: every side of a triangle
+        // is shared with exactly one other triangle, running the other way. A 40 x 30 x 10 block
+        // with its four upright edges rounded (curved faces), laid on its long side (a quarter
+        // turn), and one with its top back edge chamfered 3 mm, laid on the 45° face (a turn about
+        // a slanted axis). Both formats a slicer is sent.
+        let cases = [
+            ("solid.fillet", json!({"edges": [[40, 30, 5], [0, 30, 5], [40, 0, 5], [0, 0, 5]], "radius": 4}), [20., 0., 5.]),
+            ("solid.chamfer", json!({"edges": [[20, 30, 10]], "distance": 3}), [20., 28.5, 8.5]),
+        ];
+        for (edit, params, point) in cases {
+            let mut s = Session::default();
+            run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 10, "corner": [0, 0, 0], "body_name": "Block"}));
+            run(&mut s, edit, params);
+            run(&mut s, "body.print_face", json!({"body": "Block", "point": point}));
+            for (id, name) in [("file.export_3mf", "laid.3mf"), ("file.export_stl", "laid.stl")] {
+                let path = temp_path("closed", name);
+                let reply = run(&mut s, id, json!({"path": path, "lay_on_print_faces": true}));
+                assert_eq!(reply["print_faces"], json!(["Block"]), "{edit} {id}: {reply}");
+                assert!(reply.get("warnings").is_none(), "{edit} {id}: {reply}");
+                let triangles = mesh_triangles(&path);
+                assert!(!triangles.is_empty(), "{edit} {id}: no triangles");
+                assert_eq!(unmatched_sides(&triangles), 0, "{edit} {id}: {} triangles", triangles.len());
+                // The count sees a hole: one triangle fewer leaves its three sides open.
+                assert_eq!(unmatched_sides(&triangles[1..]), 3, "{edit} {id}");
+                let lowest = triangles.iter().flatten().map(|p| f64::from(p[2])).fold(f64::INFINITY, f64::min);
+                assert!(near_f32(lowest, 0.), "{edit} {id}: the print face is at Z = {lowest}");
+            }
+        }
+    }
+
     #[test]
     fn an_export_with_lay_on_print_faces_writes_a_body_without_one_as_it_lies() {
         // A second body with no print face lies where it is; a print face cut away is reported.
