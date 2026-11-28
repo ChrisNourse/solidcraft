@@ -1006,6 +1006,11 @@ fn feature_is_rib(b: &ModelBody, fid: u64) -> bool {
     history_feature(b, fid).is_some_and(|f| matches!(f.kind, FeatureKind::Rib { .. }))
 }
 
+/// Whether feature `fid` that made/modified body `b` is a sheet metal feature.
+fn feature_is_sheet(b: &ModelBody, fid: u64) -> bool {
+    history_feature(b, fid).is_some_and(|f| f.kind.is_sheet())
+}
+
 /// Feature `fid` in the history of body `b`: the features that made or changed it, latest first.
 fn history_feature(b: &ModelBody, fid: u64) -> Option<&crate::Feature> {
     let mut origin = b.names.origin.as_deref();
@@ -1593,7 +1598,10 @@ fn numbered_rib_face(st: &ModelState, name: &str, p: Vec3) -> Option<FaceHit> {
 /// rib `F7` made; any other side, to the face with that name, or, when none has it, to the pieces
 /// of the face it is a piece of: a piece told apart by the faces around it names the rib's faces
 /// the old way too (`F2:inner(F1:-z)#[F2:inner(F1:+x),F7:face:2]`). The edge is the one exact edge
-/// between such faces that the saved point lies on, as [`recover_positional_edge`] finds one.
+/// between such faces that the saved point lies on, as [`recover_positional_edge`] finds one. A
+/// sheet feature's faces saved by their numbers (`F3:face:7|F3:face:8`, as builds before #6748
+/// named them, see [`numbered_sheet_face`]) answer the same way, unless the feature still numbers
+/// a face of the body.
 fn recover_numbered_rib_edge(b: &ModelBody, name: &str, near: Vec3) -> Option<EdgeHit> {
     if b.body.is_mesh() || !near.is_finite() || b.body.face_count() > MAX_PROJECTION_RECOVERY_FACES {
         return None;
@@ -1601,7 +1609,9 @@ fn recover_numbered_rib_edge(b: &ModelBody, name: &str, near: Vec3) -> Option<Ed
     let parts = split_top_level_bars(strip_edge_number(name));
     let [fa, fb] = parts.as_slice() else { return None };
     let names = naming::names(b);
-    let rib = |part: &str| numbered_face_feature(part).filter(|fid| feature_is_rib(b, *fid) && !names.faces.iter().any(|own| own == part));
+    let numbers = |fid: u64| names.faces.iter().any(|own| numbered_face_feature(own) == Some(fid));
+    let renamed = |fid: u64| feature_is_rib(b, fid) || (feature_is_sheet(b, fid) && !numbers(fid));
+    let rib = |part: &str| numbered_face_feature(part).filter(|fid| renamed(*fid) && !names.faces.iter().any(|own| own == part));
     if rib(fa).is_none() && rib(fb).is_none() {
         return None;
     }
