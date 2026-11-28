@@ -876,6 +876,79 @@ fn loft_and_sweep() {
 }
 
 #[test]
+fn sweep_pipe_along_contiguous_tangent_3d_arcs_in_different_planes() {
+    let round6 = |v: Vec3| Vec3::new((v.x * 1e6).round() / 1e6, (v.y * 1e6).round() / 1e6, (v.z * 1e6).round() / 1e6);
+    let arc_from_3 = |a: Vec3, mid: Vec3, b: Vec3| -> PathSeg {
+        let (vb, vc) = (mid - a, b - a);
+        let n = vb.cross(vc);
+        let axis = n.normalized().unwrap();
+        let center = a + (n.cross(vb) * vc.len2() + vc.cross(n) * vb.len2()) * (0.5 / n.len2());
+        let (u, v) = (a - center, b - center);
+        let mut angle = u.cross(v).dot(axis).atan2(u.dot(v));
+        if angle <= 0.0 {
+            angle += std::f64::consts::TAU;
+        }
+        PathSeg::Arc { a, center, axis, angle }
+    };
+
+    let bend_r = 50.0_f64;
+    let pipe_r = 3.0_f64;
+    let disc = Region2 { outer: Loop2::circle(Vec2::ZERO, pipe_r), holes: vec![] };
+    let plane = Plane { origin: Vec3::ZERO, x: Vec3::Y, y: Vec3::Z };
+    let ang1 = 53.0_f64.to_radians();
+    let ang2 = 60.0_f64.to_radians();
+    let ang3 = 45.0_f64.to_radians();
+
+    // Case 1: three directly contiguous exact tangent 3D arcs in perpendicular planes.
+    let p1_end = Vec3::new(bend_r * ang1.sin(), bend_r * (1.0 - ang1.cos()), 0.0);
+    let t1 = Vec3::new(ang1.cos(), ang1.sin(), 0.0);
+    let n2 = Vec3::Z;
+    let axis2 = t1.cross(n2);
+    let p2_end = p1_end + t1 * (bend_r * ang2.sin()) + n2 * (bend_r * (1.0 - ang2.cos()));
+    let t2 = t1 * ang2.cos() + n2 * ang2.sin();
+    let n3 = Vec3::new(-ang1.sin(), ang1.cos(), 0.0);
+    let axis3 = t2.cross(n3);
+    let exact_arcs = [
+        PathSeg::Arc { a: Vec3::ZERO, center: Vec3::new(0.0, bend_r, 0.0), axis: Vec3::Z, angle: ang1 },
+        PathSeg::Arc { a: p1_end, center: p1_end + n2 * bend_r, axis: axis2, angle: ang2 },
+        PathSeg::Arc { a: p2_end, center: p2_end + n3 * bend_r, axis: axis3, angle: ang3 },
+    ];
+    let exact_body = sweep(&plane, &disc, &exact_arcs).unwrap();
+    let exact_vol = PI * pipe_r * pipe_r * bend_r * (ang1 + ang2 + ang3);
+    assert!(rel(measure(&exact_body).unwrap().volume, exact_vol) < 1e-3, "{} vs {exact_vol}", measure(&exact_body).unwrap().volume);
+
+    // Case 2: lead-in + two tangent 3D arcs in perpendicular planes separated by a 0.0009 mm
+    // 6-decimal rounded bridge + a directly contiguous third arc + lead-out (exercises the
+    // fitted curve-sweep path where a rounding-tilted short bridge previously folded the net).
+    let lead = 20.0_f64;
+    let bridge_len = 0.0009_f64;
+    let q1_start = Vec3::new(lead, 0.0, 0.0);
+    let q1_mid = Vec3::new(lead + bend_r * (ang1 * 0.5).sin(), bend_r * (1.0 - (ang1 * 0.5).cos()), 0.0);
+    let q1_end = Vec3::new(lead + bend_r * ang1.sin(), bend_r * (1.0 - ang1.cos()), 0.0);
+    let q2_start = q1_end + t1 * bridge_len;
+    let q2_mid = q2_start + t1 * (bend_r * (ang2 * 0.5).sin()) + n2 * (bend_r * (1.0 - (ang2 * 0.5).cos()));
+    let q2_end = q2_start + t1 * (bend_r * ang2.sin()) + n2 * (bend_r * (1.0 - ang2.cos()));
+    let q3_mid = q2_end + t2 * (bend_r * (ang3 * 0.5).sin()) + n3 * (bend_r * (1.0 - (ang3 * 0.5).cos()));
+    let q3_end = q2_end + t2 * (bend_r * ang3.sin()) + n3 * (bend_r * (1.0 - ang3.cos()));
+    let t3 = t2 * ang3.cos() + n3 * ang3.sin();
+    let q_out = q3_end + t3 * lead;
+    let (a1, m1, b1) = (round6(q1_start), round6(q1_mid), round6(q1_end));
+    let (a2, m2, b2) = (round6(q2_start), round6(q2_mid), round6(q2_end));
+    let (m3, b3) = (round6(q3_mid), round6(q3_end));
+    let bridged = [
+        PathSeg::Line { a: Vec3::ZERO, b: a1 },
+        arc_from_3(a1, m1, b1),
+        PathSeg::Line { a: b1, b: a2 },
+        arc_from_3(a2, m2, b2),
+        arc_from_3(b2, m3, b3),
+        PathSeg::Line { a: b3, b: round6(q_out) },
+    ];
+    let bridged_body = sweep(&plane, &disc, &bridged).unwrap();
+    let bridged_vol = PI * pipe_r * pipe_r * (2.0 * lead + bridge_len + bend_r * (ang1 + ang2 + ang3));
+    assert!(rel(measure(&bridged_body).unwrap().volume, bridged_vol) < 1e-3, "{} vs {bridged_vol}", measure(&bridged_body).unwrap().volume);
+}
+
+#[test]
 fn sweep_round_a_sharp_corner_is_mitred() {
     // A 2 × 2 square centred on an L of two 10 mm lines: lines alone would slide the profile
     // along the second leg within its own plane (an empty, inside-out body). Mitred, the
@@ -2564,6 +2637,52 @@ fn raise_band_on_a_rounded_rim() {
     }
 }
 
+/// An outside lip on a shelled cylinder (#20625): the band's outer wall rises from the rim's kept
+/// circle, whose interval is on its NURBS form (arc length), not its angle. Taken as an angle,
+/// the wall's form came out half a turn from its edges for radii 35, 40 and 45: its pcurves ran
+/// past its domain, SMLib's check refused it ("Edge endpoints within face domain") and the next
+/// join failed. Every pcurve ends inside its face's domain (SMLib's tests 70 to 72), and a box
+/// joined under the floor adds its 20 × 10 × 1 to the band's area times its height.
+#[test]
+fn raise_band_outside_a_round_rim_keeps_its_wall_form_under_its_edges() {
+    use solidcore_record::brep::{Curve2, Loop};
+    for r in [20.0, 30.0, 35.0, 40.0, 45.0, 50.0] {
+        let b = extrude(&Plane::XY, &[Region2 { outer: Loop2::circle(Vec2::ZERO, r), holes: vec![] }], 0.0, 20.0).unwrap().pop().unwrap();
+        let sh = shell(&b, &[Vec3::new(0.0, 0.0, 20.0)], 4.0).unwrap();
+        let v0 = measure(&sh).unwrap().volume;
+        let lip = crate::lip::raise_band(&sh, Vec3::new(r - 2.0, 0.0, 20.0), 2.0, 4.0, true).unwrap();
+        let rec = crate::native::brep_record(&lip).unwrap();
+        for (fi, f) in rec.faces.iter().enumerate() {
+            for l in &f.loops {
+                let Loop::Edges { edges } = l else { continue };
+                for u in edges {
+                    let pts: Vec<[f64; 2]> = match &u.pcurve {
+                        Curve2::Spline { points, .. } => points.clone(),
+                        Curve2::RationalSpline { homogeneous, .. } => homogeneous.iter().map(|h| [h[0] / h[2], h[1] / h[2]]).collect(),
+                    };
+                    for p in [pts.first(), pts.last()].into_iter().flatten() {
+                        for d in 0..2 {
+                            let [lo, hi] = f.domain[d];
+                            assert!(
+                                p[d] >= lo - 1e-4 && p[d] <= hi + 1e-4,
+                                "r {r}: face {fi} edge {}: pcurve end {p:?} off domain {:?}",
+                                u.edge,
+                                f.domain
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let tab = box_solid(Vec3::new(-10.0, -5.0, -1.0), Vec3::new(10.0, 5.0, 0.0)).unwrap();
+        let joined = boolean(&lip, &tab, BoolOp::Union).unwrap().unwrap();
+        let band = PI * (r * r - (r - 2.0) * (r - 2.0));
+        let want = v0 + band * 4.0 + 200.0;
+        let v = measure(&joined).unwrap().volume;
+        assert!(rel(v, want) < 1e-5, "r {r}: {v} vs {want}");
+    }
+}
+
 /// A lip wider than its rim (#16742): the band reaches past the rim's outer wall, so what is left of
 /// the face is the underside of the overhang. It faces down, away from the rim's top, and the
 /// ring's two edges round with a small fillet. Volume added is the band's area times its height.
@@ -2629,6 +2748,127 @@ fn raise_band_on_a_sloped_rim_of_ellipses_is_refused_as_not_supported_yet() {
     let text = raise_band(&sloped, at, 1.5, 3.0, false).unwrap_err().to_string();
     assert!(text.contains("not supported yet") && text.contains("ellipse"), "{text}");
     assert!(raise_band(&ring, Vec3::new(-26.0, 0.0, 20.0), 1.5, 3.0, false).is_ok());
+}
+
+/// #21608: a shelled D, three sides of a 60 × 40 rectangle closed by an arc that meets them at
+/// sharp corners, bulging out (s = 1) or biting in (s = −1). The band's far edge moves the lines
+/// by the width and the arc's radius by it, so it closes where they cross. Both bands, inside and
+/// outside, add their area times the height and keep the counts of the lip's faces.
+#[test]
+fn raise_band_where_an_arc_meets_lines_at_sharp_corners() {
+    let (w, h, t) = (1.5, 2.0, 3.0);
+    let half = (20.0f64 / 30.0).atan();
+    let big = (30.0f64 * 30.0 + 20.0 * 20.0).sqrt();
+    for s in [1.0, -1.0] {
+        let cx = 30.0 * s;
+        let d_shape = Loop2 {
+            segs: vec![
+                Seg2::Line { a: Vec2::ZERO, b: Vec2::new(60.0, 0.0) },
+                Seg2::Line { a: Vec2::new(60.0, 0.0), b: Vec2::new(60.0, 40.0) },
+                Seg2::Line { a: Vec2::new(60.0, 40.0), b: Vec2::new(0.0, 40.0) },
+                Seg2::Arc { center: Vec2::new(cx, 20.0), radius: big, start: 20f64.atan2(-cx), sweep: 2.0 * s * half },
+            ],
+        };
+        let b = extrude(&Plane::XY, &[Region2 { outer: d_shape, holes: vec![] }], 0.0, 15.0).unwrap().pop().unwrap();
+        let sh = shell(&b, &[Vec3::new(30.0, 20.0, 15.0)], t).unwrap();
+        let v0 = measure(&sh).unwrap().volume;
+        // The D moved in by d: lines y = d, x = 60 − d, y = 40 − d, and the circle of radius
+        // big − s·d meeting y = d at x₁; a rectangle from x₁, with the circle's segment beyond
+        // the chord x = x₁ added (bulging out) or taken away (biting in).
+        let area = |d: f64| {
+            let rho = big - s * d;
+            let x1 = cx - s * (rho * rho - (20.0 - d) * (20.0 - d)).sqrt();
+            let theta = 2.0 * ((20.0 - d) / rho).asin();
+            (60.0 - d - x1) * (40.0 - 2.0 * d) + s * rho * rho / 2.0 * (theta - theta.sin())
+        };
+        for outside in [false, true] {
+            let lip = raise_band(&sh, Vec3::new(30.0, 1.5, 15.0), w, h, outside).unwrap();
+            assert!(lip.validity().is_empty(), "s {s}, outside {outside}: {:?}", lip.validity());
+            let band = if outside { area(0.0) - area(w) } else { area(t - w) - area(t) };
+            let v = measure(&lip).unwrap().volume;
+            assert!(rel(v, v0 + band * h) < 1e-6, "s {s}, outside {outside}: {v} vs {}", v0 + band * h);
+            // The shell's 11 faces less the rim, the rim's rest, 4 walls on each side and the top;
+            // 4 new edges round the band's edge, 4 up from it and from the loop, 8 on the top.
+            assert_eq!((lip.face_count(), lip.edge_count(), lip.vertex_count()), (20, 44, 28), "s {s}, outside {outside}");
+            // A groove's profile is the same band: its area, as a slab 1 thick.
+            let (plane, region) = rim_band(&sh, Vec3::new(30.0, 1.5, 15.0), w, 0.0, outside).unwrap();
+            let slab = extrude(&plane, &[region], 0.0, 1.0).unwrap().pop().unwrap();
+            let want = if outside { area(0.0) - area(w) } else { area(t - w) - area(t) };
+            let got = measure(&slab).unwrap().volume;
+            assert!(rel(got, want) < 1e-6, "groove s {s}, outside {outside}: {got} vs {want}");
+        }
+    }
+}
+
+/// #21608: a shelled lens, two arcs of radius 25 about (±15, 0) meeting at sharp corners (0, ±20):
+/// the band's far edge closes where the two moved circles cross. Moved in by d, the lens is two
+/// segments of radius 25 − d on the chord x = 0. A band wider than 25 − 15 parts the circles
+/// at the corners, and is refused.
+#[test]
+fn raise_band_where_two_arcs_meet_at_sharp_corners() {
+    let (big, c, t, w, h) = (25.0f64, 15.0f64, 3.0, 1.5, 2.0);
+    let half = (20.0f64 / c).atan();
+    let lens = Loop2 {
+        segs: vec![
+            Seg2::Arc { center: Vec2::new(-c, 0.0), radius: big, start: -half, sweep: 2.0 * half },
+            Seg2::Arc { center: Vec2::new(c, 0.0), radius: big, start: PI - half, sweep: 2.0 * half },
+        ],
+    };
+    let b = extrude(&Plane::XY, &[Region2 { outer: lens, holes: vec![] }], 0.0, 15.0).unwrap().pop().unwrap();
+    let sh = shell(&b, &[Vec3::new(0.0, 0.0, 15.0)], t).unwrap();
+    let v0 = measure(&sh).unwrap().volume;
+    let area = |d: f64| {
+        let rho = big - d;
+        let theta = 2.0 * ((rho * rho - c * c).sqrt() / rho).asin();
+        rho * rho * (theta - theta.sin())
+    };
+    let at = Vec3::new(10.0 - 1.5, 0.0, 15.0);
+    for outside in [false, true] {
+        let lip = raise_band(&sh, at, w, h, outside).unwrap();
+        assert!(lip.validity().is_empty(), "outside {outside}: {:?}", lip.validity());
+        let band = if outside { area(0.0) - area(w) } else { area(t - w) - area(t) };
+        let v = measure(&lip).unwrap().volume;
+        assert!(rel(v, v0 + band * h) < 1e-6, "outside {outside}: {v} vs {}", v0 + band * h);
+        // The shell's 7 faces less the rim, the rim's rest, 2 walls on each side and the top.
+        assert_eq!((lip.face_count(), lip.edge_count(), lip.vertex_count()), (12, 22, 14), "outside {outside}");
+    }
+    let text = raise_band(&sh, at, 11.0, h, true).unwrap_err().to_string();
+    assert!(text.contains("can't go round"), "{text}");
+}
+
+/// A plate shaped as two 20 × 20 squares joined by a neck 10 long and 4 wide, with a hole in one
+/// square. A band 1.5 wide along the outer loop still fits through the neck: it adds its area
+/// (840 − 591) times its height and 25 faces, 60 edges and 36 vertices. A band 3 wide moves the
+/// neck's two sides past each other, so its far edge crosses itself: refused.
+#[test]
+fn raise_band_refuses_a_band_whose_far_edge_crosses_itself_at_a_neck() {
+    let dumbbell = Loop2::polygon(&[
+        Vec2::new(0.0, -10.0),
+        Vec2::new(20.0, -10.0),
+        Vec2::new(20.0, -2.0),
+        Vec2::new(30.0, -2.0),
+        Vec2::new(30.0, -10.0),
+        Vec2::new(50.0, -10.0),
+        Vec2::new(50.0, 10.0),
+        Vec2::new(30.0, 10.0),
+        Vec2::new(30.0, 2.0),
+        Vec2::new(20.0, 2.0),
+        Vec2::new(20.0, 10.0),
+        Vec2::new(0.0, 10.0),
+    ]);
+    let plate = Region2 { outer: dumbbell, holes: vec![Loop2::circle(Vec2::new(10.0, 0.0), 3.0)] };
+    let plate = extrude(&Plane::XY, &[plate], 0.0, 5.0).unwrap().pop().unwrap();
+    let v0 = measure(&plate).unwrap().volume;
+    let at = Vec3::new(45.0, 0.0, 5.0);
+    let lip = raise_band(&plate, at, 1.5, 2.0, true).unwrap();
+    assert!(lip.validity().is_empty(), "{:?}", lip.validity());
+    let v = measure(&lip).unwrap().volume;
+    assert!(rel(v, v0 + 249.0 * 2.0) < 1e-6, "{v} vs {}", v0 + 249.0 * 2.0);
+    let counts = |b: &Body| (b.face_count(), b.edge_count(), b.vertex_count());
+    let (f, e, n) = counts(&plate);
+    assert_eq!(counts(&lip), (f + 25, e + 60, n + 36));
+    let text = raise_band(&plate, at, 3.0, 2.0, true).unwrap_err().to_string();
+    assert!(text.contains("crosses itself"), "{text}");
 }
 
 #[test]
@@ -3900,6 +4140,32 @@ fn a_curve_chain_by_edge_index_starts_from_that_edge() {
     assert!(crate::curve_chain_of_edges(&b, &[], solidcraft_geom::TANGENT_CHAIN).is_err());
 }
 
+/// A face chain picked by face index runs round a slot's side: from a flat side, across the
+/// tangent edges onto both half cylinders and the other flat side, never onto the top or bottom it
+/// meets at sharp edges (#22845). An index the body does not have is refused.
+#[test]
+fn a_face_chain_by_face_index_runs_round_a_slots_tangent_side() {
+    let slab = box_solid(Vec3::new(-10.0, -15.0, 0.0), Vec3::new(10.0, 15.0, 12.0)).unwrap();
+    let mut b = slab;
+    for y in [-15.0, 15.0] {
+        let end = cylinder(Vec3::new(0.0, y, 0.0), Vec3::new(0.0, 0.0, 1.0), 10.0, 12.0).unwrap();
+        b = crate::boolean(&b, &end, crate::BoolOp::Union).unwrap().unwrap();
+    }
+    let face = |p: Vec3| b.face_at_point(p).unwrap().unwrap();
+    let side = face(Vec3::new(10.0, 0.0, 6.0));
+    let chain = crate::tangent_face_chain_of_faces(&b, &[side], solidcraft_geom::TANGENT_CHAIN).unwrap();
+    assert_eq!(chain.first(), Some(&side));
+    for p in [Vec3::new(-10.0, 0.0, 6.0), Vec3::new(0.0, 25.0, 6.0), Vec3::new(0.0, -25.0, 6.0)] {
+        assert!(chain.contains(&face(p)), "{p:?} in {chain:?}");
+    }
+    for p in [Vec3::new(0.0, 0.0, 12.0), Vec3::new(0.0, 0.0, 0.0)] {
+        assert!(!chain.contains(&face(p)), "{p:?} not in {chain:?}");
+    }
+    let count = b.record().faces.len();
+    assert!(crate::tangent_face_chain_of_faces(&b, &[count], solidcraft_geom::TANGENT_CHAIN).is_err());
+    assert!(crate::tangent_face_chain_of_faces(&b, &[], solidcraft_geom::TANGENT_CHAIN).is_err());
+}
+
 /// Whether a path of body edges lies in one plane is decided over each free-form span's whole
 /// length from its control points, not from its directions at sampled points. A degree 9 span
 /// along x whose height is the integral of `c (t - 1/8) (t - 2/8) … (t - 1)` runs level at eight
@@ -3967,4 +4233,21 @@ fn a_free_form_span_that_bows_out_of_plane_between_samples_has_no_plane() {
     let n = PathSeg::plane_normal(&path(0.0), 1e-6).unwrap();
     assert!(n.cross(normal).len() < 1e-9, "{n:?}");
     assert_eq!(PathSeg::plane_normal(&path(1e-3), 1e-6), None);
+}
+
+/// A drawing leader on an edge's polyline (#22195): the fraction of its length nearest a picked
+/// point, and the point a fraction along it, are each other's inverse and measure by length.
+#[test]
+fn polyline_fraction_and_point_measure_by_length() {
+    let line = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 30.0, 0.0)];
+    let f = polyline_fraction_at(&line, Vec3::new(12.0, 10.0, 5.0)).unwrap();
+    assert!((f - 0.5).abs() < 1e-12, "{f}");
+    let p = polyline_point_at(&line, f).unwrap();
+    assert!(p.dist(Vec3::new(10.0, 10.0, 0.0)) < 1e-12, "{p:?}");
+    assert_eq!(polyline_fraction_at(&line, Vec3::new(-5.0, 1.0, 0.0)), Some(0.0));
+    assert_eq!(polyline_point_at(&line, 2.0), Some(line[2]));
+    let still = [Vec3::new(1.0, 1.0, 1.0); 2];
+    assert_eq!(polyline_fraction_at(&still, Vec3::new(0.0, 0.0, 0.0)), None);
+    assert_eq!(polyline_point_at(&still, 0.5), None);
+    assert_eq!(polyline_point_at(&line, f64::NAN), None);
 }

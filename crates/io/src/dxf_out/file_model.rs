@@ -169,7 +169,7 @@ impl DxfTextSource {
     }
 
     pub(super) fn transformed(&self, translation: Vec2, scale: f64) -> Result<Self> {
-        let first_anchor_mm = self.first_anchor_mm.map(|p| solidcraft_kernel::services::dxf::export::transform_anchor(p, scale, translation));
+        let first_anchor_mm = self.first_anchor_mm.map(|p| solidcraft_kernel::dxf::export::transform_anchor(p, scale, translation));
         let raw_group1 = self
             .raw_group1
             .as_deref()
@@ -245,6 +245,7 @@ pub struct DxfFile<G> {
     max_layers: usize,
     max_entities: usize,
     pub(super) compatibility: Option<super::export_compatibility::Budget>,
+    warnings: Vec<String>,
 }
 
 fn owner_from(counter: &AtomicUsize) -> Result<usize> {
@@ -286,6 +287,16 @@ fn name_of(input: &str) -> Result<String> {
 }
 
 impl<G> DxfFile<G> {
+    /// What the reading kept as a simplification, one note each (a text style's font the import
+    /// does not carry, say). Empty for a file built in memory.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    pub(crate) fn push_warning(&mut self, warning: String) {
+        self.warnings.push(warning);
+    }
+
     pub fn new() -> Result<Self> {
         Self::with_limits(MAX_LAYERS, MAX_ENTITIES)
     }
@@ -331,6 +342,7 @@ impl<G> DxfFile<G> {
             max_layers: max_layers.min(MAX_LAYERS),
             max_entities: max_entities.min(MAX_ENTITIES),
             compatibility: None,
+            warnings: Vec::new(),
         })
     }
 
@@ -359,6 +371,7 @@ impl<G> DxfFile<G> {
             max_layers: crate::sketch2d::MAX_ENTITIES.checked_mul(2).ok_or_else(|| invalid("DXF source layer count overflow"))?,
             max_entities: crate::sketch2d::MAX_ENTITIES,
             compatibility: None,
+            warnings: Vec::new(),
         })
     }
 

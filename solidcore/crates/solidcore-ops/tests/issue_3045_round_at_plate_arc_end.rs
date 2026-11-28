@@ -2,9 +2,9 @@
 //! cylinder of radius R tangent to the side and inside the arc's cylinder; it removes 8 times
 //! (the thickness) the area between the corner and that circle.
 //!
-//! The failing configuration needs three of the fixes together: the arc face a cylinder
-//! (`linear_sweep_arc_is_cylinder`) and its offsets continued as themselves
-//! (`offset_extension_from_base`, `offset_extension_as_itself`). The continued cylinder is a
+//! The failing configuration needs the arc face a cylinder (`linear_sweep_arc_is_cylinder`),
+//! whose offsets continue as themselves (once two fixes, now the only path, WR-633/650;
+//! #18921). The continued cylinder is a
 //! whole circle, so the drop of the rail's end onto it found the circle's far side, where the
 //! solve has a second root outside the face. Measured on this plate (arc 16.25, bisected to
 //! 0.01): without the fix the round failed with status 1001 for R from 6.26 to 11.8 and built
@@ -12,6 +12,7 @@
 
 #![allow(clippy::disallowed_methods)] // closed-form oracle, not ops geometry
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test
+use solidcore::math::det;
 
 mod common;
 
@@ -46,7 +47,7 @@ impl Plate {
 
     fn body(&self) -> Body {
         let s = self.s;
-        let half = (self.cy() / self.rc()).asin();
+        let half = det::asin(self.cy() / self.rc());
         let line = |start: [f64; 3], end: [f64; 3]| Curve::Line { start, end };
         let profile = vec![
             line([0.0, 0.0, 0.0], [100.0 * s, 0.0, 0.0]),
@@ -74,15 +75,15 @@ impl Plate {
 
     /// The plate's volume: the 100 x 30 rectangle and the arc's segment past x = 100.
     fn volume(&self) -> f64 {
-        let turn = 2.0 * (self.cy() / self.rc()).asin();
+        let turn = 2.0 * det::asin(self.cy() / self.rc());
         let (rc, s) = (self.rc(), self.s);
-        self.thickness() * (3000.0 * s * s + rc * rc / 2.0 * (turn - turn.sin()))
+        self.thickness() * (3000.0 * s * s + rc * rc / 2.0 * (turn - det::sin(turn)))
     }
 
     /// The round's centre abscissa, `cx + dx`: the circle of radius `r` tangent to the side
     /// (y = 0) and inside the arc's circle, `|centre - (cx, cy)| = rc - r`.
     fn round_x(&self, r: f64) -> f64 {
-        self.cx() + ((self.rc() - r).powi(2) - (self.cy() - r).powi(2)).sqrt()
+        self.cx() + (det::powi(self.rc() - r, 2) - det::powi(self.cy() - r, 2)).sqrt()
     }
 
     /// The area the round of radius `r` removes: between the corner (100, 0), the side and the
@@ -91,12 +92,12 @@ impl Plate {
     /// sin a) + cy r (cos a - cos b))`, the side nothing.
     fn removed_area(&self, r: f64) -> f64 {
         let fx = self.round_x(r);
-        let contact = (r - self.cy()).atan2(fx - self.cx());
-        let corner = (-self.cy()).atan2(100.0 * self.s - self.cx());
+        let contact = det::atan2(r - self.cy(), fx - self.cx());
+        let corner = det::atan2(-self.cy(), 100.0 * self.s - self.cx());
         let arc = |(cx, cy): (f64, f64), rad: f64, a: f64, b: f64| {
             0.5 * (rad * rad * (b - a)
-                + cx * rad * (b.sin() - a.sin())
-                + cy * rad * (a.cos() - b.cos()))
+                + cx * rad * (det::sin(b) - det::sin(a))
+                + cy * rad * (det::cos(a) - det::cos(b)))
         };
         (arc((fx, r), r, -FRAC_PI_2, contact)
             + arc((self.cx(), self.cy()), self.rc(), contact, corner))
@@ -145,7 +146,7 @@ fn check_round(b: &Body, r: f64, axis_x: f64, expected: f64, what: &str) {
     assert_eq!(rounds.len(), 1, "{what}: one cylinder of radius {r}");
     let p = rounds.first().copied().unwrap();
     assert!(
-        ((p.x - axis_x).hypot(p.y - r) - r).abs() < 1e-9,
+        (det::hypot(p.x - axis_x, p.y - r) - r).abs() < 1e-9,
         "{what}: the round's cylinder is about ({axis_x}, {r})"
     );
 }
@@ -182,7 +183,7 @@ fn check_straight_end(flags: &str) {
 const SCALE_1: [f64; 10] = [3.0, 6.0, 6.25, 6.3, 6.5, 7.0, 10.0, 11.8, 11.9, 12.0];
 const SCALE_2: [f64; 4] = [6.0, 12.5, 13.0, 20.0];
 
-/// Without the guard the three fixes fail with status 1001 for R from 6.26 to 11.8 on the scale-1
+/// Without the guard the cylinder arc face fails with status 1001 for R from 6.26 to 11.8 on the scale-1
 /// plate (and the same fractions of the arc's radius on the scale-2 plate); with none of them
 /// it always built. The radii bracket both ends of the band (6.25 and 6.3, 11.8 and 11.9) and
 /// sit inside it (6.5, 7, 10). One test: the fixes are one process-wide setting.
@@ -192,12 +193,8 @@ fn the_round_builds_for_every_radius() {
     for (flags, names) in [
         ("default flags", &[][..]),
         (
-            "the three fixes",
-            &[
-                "linear_sweep_arc_is_cylinder",
-                "offset_extension_from_base",
-                "offset_extension_as_itself",
-            ][..],
+            "linear_sweep_arc_is_cylinder",
+            &["linear_sweep_arc_is_cylinder"][..],
         ),
     ] {
         session::set_fixes(names.iter().copied()).unwrap();

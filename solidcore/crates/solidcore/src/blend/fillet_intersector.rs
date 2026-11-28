@@ -151,6 +151,7 @@ use crate::intersect::surface_intersector::p4::{
     LawIntersectionOptions, PointIntersectionOptions,
 };
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{max2, max4, min2, EFF_ZERO, EFF_ZERO_SQ};
 use crate::nurbs::b_spline_curve::{BSplineCurve, BSplineCurveForm, CanonicalData, KnotType};
 use crate::nurbs::math::gamma;
@@ -1452,7 +1453,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             tsect.tangent_plane_angle_rad,
             next_tsp.tangent_plane_angle_rad,
         );
-        let mut adjusted_tolerance = 2.0 * si.this_approx_tol_3d * (min_tan_angle / 2.0).sin();
+        let mut adjusted_tolerance = 2.0 * si.this_approx_tol_3d * det::sin(min_tan_angle / 2.0);
         // Don't let the adjusted tolerance get to be less then 1/10th of the actual
         // tolerance.
         adjusted_tolerance = max2(adjusted_tolerance, si.this_approx_tol_3d / 1.0);
@@ -3265,6 +3266,25 @@ where
     ) -> Result<SpanAccuracy> {
         self.intersector
             .test_span_accuracy(self.solver, k, point, next, mid)
+    }
+
+    /// Not upstream (#21179): a step that ends at a corner of the radius law
+    /// ([`FilletIntersector::land_on_radius_corner`]) ends on the through point made at that
+    /// corner: both points lie at a corner of the law, within the trace's tolerance of each
+    /// other (which corner) and within half the domains' sizes in UV (which turn of a closed
+    /// surface).
+    fn landed_on_through_point(&mut self, next: TsectId, through: TsectId) -> Result<bool> {
+        let si = &self.intersector.base.base;
+        let (next, through) = (si.point(next)?, si.point(through)?);
+        if !(self.solver.is_at_radius_corner(next) && self.solver.is_at_radius_corner(through)) {
+            return Ok(false);
+        }
+        Ok(next
+            .crv_pos()
+            .closer_than(si.this_approx_tol_3d, through.crv_pos())
+            && SRFS.iter().zip(&si.uv_domains).all(|(&s, domain)| {
+                next.uv_pos(s).distance(through.uv_pos(s)) < domain.size().length() / 2.0
+            }))
     }
 }
 

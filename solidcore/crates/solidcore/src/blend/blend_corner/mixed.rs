@@ -44,6 +44,7 @@
 
 pub mod algebra;
 
+use crate::math::det;
 use algebra::{Crv, Side, TwistTerm, V4};
 
 use crate::blend::blend_corner::swept::SweptSolvers;
@@ -80,6 +81,16 @@ use crate::surface::surface::{Surface, SurfaceKind};
 use crate::topology::brep::p7::{make_face_with_curves, FaceCurvesInput};
 use crate::topology::edgeuse::p1 as eu1;
 use crate::topology::{edge, Brep, EdgeId, EdgeuseId, FaceId, VertexId};
+
+/// The session's refusal of a Mixed corner of rounds (#22151): its faces L and U are Coons
+/// patches of their sides, not a rolling ball's surface, so their volume is no round's and
+/// depends on where the neighbouring faces' seams lie. The corner belongs to the blend
+/// corner's Roll-over (convex pass first, `docs/generic-blend.md` §3.2); until that build
+/// takes this configuration (a drafted wall, a cone for the end face), the vertex is refused
+/// with its point instead of returning the fill.
+pub const MIXED_ROUNDS_NOT_BUILT: &str = "Fillet Error: a convex and a concave round run into \
+    each other at a point where their common face narrows to zero width; the corner they need \
+    there is not built yet, so neither round is made";
 
 const OP_CLASSIFY: &str = "blend::blend_corner::mixed::classify_mixed";
 const OP_VERT: &str = "blend::blend_corner::mixed::calc_mixed_vert_geom";
@@ -1479,7 +1490,7 @@ pub fn calc_mixed_edge_geom(
             return Err(unbuildable(OP_EDGE, MixedStep::InflectionTangentsMiss));
         }
         let si = sx + dir_x * s;
-        let w = (0.5 * max(-1.0, min(1.0, dir_x.dot(dir_v))).acos()).cos();
+        let w = det::cos(0.5 * det::acos(max(-1.0, min(1.0, dir_x.dot(dir_v)))));
         let xvq = Crv {
             brk: vec![0.0, 1.0],
             seg: vec![vec![

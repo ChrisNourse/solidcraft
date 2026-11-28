@@ -143,6 +143,7 @@ use crate::intersect::point_class::ClassGeometry;
 use crate::intersect::point_class::{ClassObject, PointClassType};
 use crate::intersect::surface_intersector::p1::TsectPnt;
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{Point3, Vec3, EFF_ZERO, EFF_ZERO_SQ, PI, UNDEF_DOUBLE};
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
@@ -732,6 +733,26 @@ pub struct FilletSolver {
     /// (`ball_section_at`) is solved, extended past it (as upstream) for every other solve, the
     /// trace's included.
     pub seam_domain: SeamDomain,
+    /// Not upstream (tangency-labs/solidcraft#21940): how the rail ends' feet on a closed base
+    /// are named before the trace ([`RailEndNames`]).
+    pub rail_end_names: RailEndNames,
+}
+
+/// Not upstream (tangency-labs/solidcraft#21940): how [`FilletSolver`]'s rail ends' feet on a
+/// closed base are named before the trace (`c1_collect_points`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RailEndNames {
+    /// On their edge use's trim curve's side of the seam where some lie across it and some do
+    /// not: the ball's contact crosses the seam between the rail's ends.
+    #[default]
+    TrimCurveSide,
+    /// On the base of rail `rail` (0 or 1), in its natural domain: the rails never cross its
+    /// seam, which ends short of them (a closed blend's Join whose side seam ends inside the
+    /// band, `FilletCorner::seam_short_of_rails`); the other base as [`Self::TrimCurveSide`].
+    InDomain {
+        /// The rail whose base's seam ends short of the rails.
+        rail: usize,
+    },
 }
 
 impl FilletSolver {
@@ -801,6 +822,7 @@ impl FilletSolver {
             rolled_faces: [None, None],
             rollover_proof: RolloverProof::AfterTrace,
             seam_domain: SeamDomain::Extended,
+            rail_end_names: RailEndNames::TrimCurveSide,
             chamfer: None,
             law_corner_pieces: Vec::new(),
         }
@@ -3715,7 +3737,7 @@ pub(crate) fn test_manifold_tangent_rollover_at(
 
     // Test tangency. Note, we're comparing vectors that would be perpendicular when
     // the Faces are tangent.
-    let dot_limit = (PI / 2.0 - tangency_tol_rad).cos(); // [B683]
+    let dot_limit = det::cos(PI / 2.0 - tangency_tol_rad); // [B683]
     if bin_vec2.dot(faceuse_normal).abs() > dot_limit {
         return Ok((false, opposite_normals));
     }

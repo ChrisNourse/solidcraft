@@ -21,14 +21,17 @@
     clippy::indexing_slicing
 )] // test helpers
 use solidcore::blend::blend_corner::TurnChoice;
+use solidcore::blend::blend_refusal::BlendRefusal;
 use solidcore::blend::fillet_executive::session::FilletSession;
 use solidcore::blend::fillet_geom::p1::FilletErrorType;
 use solidcore::blend::fillet_solver::p1::FilletSurfaceGeneratorType;
 use solidcore::boolean::api_brep::{boolean_difference, boolean_union};
+use solidcore::error::SM_ERR;
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::global_solver::SolverOperation;
 use solidcore::kernel::UpstreamFixes;
 use solidcore::mass::integrator::properties::{brep_volume, PropertyAttributes};
+use solidcore::math::det;
 use solidcore::math::{Point3, BIG_DOUBLE};
 use solidcore::nurbs::b_spline_surface::SurfParamType;
 use solidcore::primitive::api_primitives::create_box;
@@ -37,8 +40,8 @@ use solidcore::surface::surface::p2::SurfaceKind;
 use solidcore::topology::brep::p5::{stitch_and_orient, StitchAndOrientOptions};
 use solidcore::topology::brep::validation::{check_brep, CheckLevel};
 use solidcore::topology::face::p2 as face2;
-use solidcore::topology::{edge, EdgeId};
-use solidcore::{Brep, Kernel};
+use solidcore::topology::{edge, vertex, EdgeId};
+use solidcore::{Brep, EntityRef, Kernel, SolidError};
 
 /// Every fix.
 fn all_fixes() -> Kernel {
@@ -232,6 +235,73 @@ fn a_pocket_rim_notes_that_no_radius_fits() {
     assert!(fit.edge.is_some_and(|e| edges.contains(&e)), "{fit:?}");
 }
 
+/// The pocket rim's refusal as data, beside its note: the error is the typed refusal at the
+/// noted corner, one of the rim's four floor corners, with the status `SM_ERR` the corners
+/// step fails with, the sharp concave side edge there (the pocket's upright edge) and the
+/// least radius it is rounded at for the turn to pass, the rounds' radius
+/// (`docs/generic-blend.md`, Turn: R >= r). The kernel case
+/// `fillets/cov-fillet-turn-swept-pocket-sharp-corner-refused-r1` is this pocket.
+#[test]
+fn a_pocket_rim_is_refused_with_its_radius_as_data() {
+    let mut k = all_fixes();
+    let mut b = pocket(&mut k);
+    let edges: Vec<EdgeId> = RIM.iter().map(|&p| pick(&k, &b, p)).collect();
+    let xs = vec![FilletSurfaceGeneratorType::Circular; edges.len()];
+    let mut s = FilletSession::new(&mut k, &mut b).unwrap();
+    s.prepare_per_edge_constant_radius(&mut k, &edges, &[1.0; 4], &xs, 1, 1.0)
+        .unwrap();
+    s.set_swept_turns(true);
+    let e = s.do_fillet(&mut k).unwrap_err();
+    let info = s.error_info();
+    assert_eq!(info.code, FilletErrorType::NoRoom as i32);
+    let at = info.location.expect("the corner's point is noted");
+    let Some(EntityRef::Vertex(v)) = e.entity() else {
+        panic!("{e:?}");
+    };
+    let SolidError::BlendRefused {
+        code,
+        refusal:
+            BlendRefusal::SweptTurnPastSharpEdge {
+                vertex: refused_at,
+                side_edge,
+                least_radius,
+            },
+        ..
+    } = e
+    else {
+        panic!("{e:?}");
+    };
+    assert_eq!(code, SM_ERR);
+    assert_eq!(refused_at, v);
+    // the rounds' one radius, asked 1: a side edge rounded at R >= 1 lets the ball pass
+    assert_eq!(least_radius, 1.0);
+    let t = s.target();
+    let p = vertex::point(t, v).unwrap();
+    assert_eq!(p, at);
+    assert!(
+        [[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [10.0, 20.0]].contains(&[p.x, p.y])
+            && p.z == 5.0,
+        "{p:?}"
+    );
+    // the side edge is the pocket's upright edge at that corner, from the floor (z 5) to the
+    // plate's top (z 10)
+    let ends = [
+        edge::start_vertex(t, side_edge).unwrap(),
+        edge::end_vertex(t, side_edge).unwrap(),
+    ]
+    .map(|end| vertex::point(t, end.unwrap()).unwrap());
+    let top = Point3::new(p.x, p.y, 10.0);
+    assert!(ends == [p, top] || ends == [top, p], "{ends:?}");
+    // refused at the corners step, before any blend is made: the pocketed plate as it was,
+    // the box's 6 faces, 12 edges and 8 vertices and the pocket's 5, 12 and 8
+    let counts = (
+        get_faces(t).unwrap().len(),
+        get_edges(t).unwrap().len(),
+        t.vertex_list().len(),
+    );
+    assert_eq!(counts, (11, 24, 16));
+}
+
 /// An L-shaped prism, two 20 x 10 x 5 boxes crossed at the origin, so the L's inner corner is a
 /// sharp concave vertical edge at (10, 10). Its two inner walls' top edges are rounded r 1
 /// together: convex rounds, whose ball lies in the material, turning round a concave side edge,
@@ -422,8 +492,8 @@ fn mitre_off(k: &Kernel, b: &Brep, side: [f64; 2], inward: [f64; 2], top: f64) -
         let p = c
             .evaluate_point(k, ivl.evaluate(f64::from(i) / 32.0))
             .unwrap();
-        let along_x = ((p.y - ya).hypot(p.z - za) - 1.0).abs();
-        let along_y = ((p.x - xa).hypot(p.z - za) - 1.0).abs();
+        let along_x = (det::hypot(p.y - ya, p.z - za) - 1.0).abs();
+        let along_y = (det::hypot(p.x - xa, p.z - za) - 1.0).abs();
         let bisector = ((p.x - side[0]).abs() - (p.y - side[1]).abs()).abs();
         worst = worst.max(along_x).max(along_y).max(bisector);
     }

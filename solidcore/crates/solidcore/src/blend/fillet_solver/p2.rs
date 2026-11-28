@@ -129,6 +129,7 @@ use crate::intersect::surface_intersector::p1::{
     IntersectionPointType, SrfIndex, TsectPnt, MAX_USER_DOUBLES,
 };
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{rad_to_deg, Point3, Vec3, EFF_ZERO, EFF_ZERO_SQ, EFF_ZERO_SQRT, PI};
 use crate::nurbs::b_spline_curve::p1::NurbCircleParam;
 use crate::nurbs::b_spline_curve::BSplineCurve;
@@ -570,7 +571,7 @@ fn run_side_edge_on_along_its_line(
     };
     // The fork's tangency-labs/smlib@779cb9b: so does a straight side edge on a cylinder or
     // cone, a ruling of it (its UV trim a line): the surface continues as itself past its
-    // domain (`offset_extension_as_itself`), along that line. A closed rim's seam is one: a
+    // domain (it extends as itself, WR-633), along that line. A closed rim's seam is one: a
     // disc's rim rounded past its 2 mm wall meets the seam's line below the wall.
     let uv_linear = uv_trim.is_linear(k, EFF_ZERO, false)?.linear;
     if !(side_3d.is_linear(k, EFF_ZERO, false)?.linear
@@ -785,7 +786,7 @@ fn trim_runs_on_in(
     };
     let (a, d) = at(from)?;
     let out = [d.x * sign, d.y * sign];
-    let speed = out[0].hypot(out[1]);
+    let speed = det::hypot(out[0], out[1]);
     if speed.is_nan() || speed <= 0.0 {
         return Ok(0.0);
     }

@@ -18,7 +18,7 @@ SKETCH appears during sketch editing; with Preferences › Interface › **Keep 
 | MODEL | CONSTRUCT | **`construct.plane.offset`**, `construct.plane.at_angle`, `construct.axis.through_cylinder`, `construct.axis.normal_to_face`, `construct.axis.two_planes`, `construct.axis.two_points`, `construct.axis.edge`, `construct.point.vertex`, `construct.point.two_edges`, `construct.point.three_planes`, `construct.point.center`, `construct.point.edge_plane`, `construct.point.along_path`, `construct.plane.midplane`, `construct.plane.two_edges`, `construct.plane.three_points`, `construct.plane.tangent`, `construct.plane.along_path`, `construct.plane.perpendicular` |
 | SURFACE | SKETCH | **`sketch.create`** |
 | SURFACE | CREATE | **`surface.extrude`**, **`surface.revolve`**, **`surface.sweep`**, **`surface.loft`**, `surface.boundary`, `surface.patch`, `surface.offset`, `surface.midsurface`, `surface.ruled`, `surface.blend` |
-| SURFACE | EDIT | **`surface.trim`**, **`surface.untrim`**, **`surface.extend`**, **`surface.stitch`**, `surface.unstitch`, `surface.reverse_normal`, `surface.fair`, `surface.fillet`, `surface.match` |
+| SURFACE | EDIT | **`surface.trim`**, **`surface.untrim`**, **`surface.extend`**, **`surface.stitch`**, `surface.unstitch`, `surface.reverse_normal`, `surface.fair`, `surface.fillet`, `surface.chamfer`, `surface.match` |
 | SURFACE | CONVERT | **`surface.thicken`**, **`mesh.convert`** |
 | ASSEMBLE | COMPONENTS | **`component.create`**, **`component.from_bodies`**, **`component.insert_design`**, **`parts.library`** |
 | ASSEMBLE | JOINTS | **`joint.create`**, **`joint.as_built`**, **`joint.origin`**, **`joint.rigid_group`**, `assembly.constraint.create`, `joint.limits`, `joint.gear`, `joint.rack_pinion`, `joint.screw`, `joint.cam`, `joint.reach` |
@@ -115,7 +115,7 @@ Explicit command-id lists override the default placement mapping. Shared command
 | SURFACE / CREATE | SURFACE / CONVERT | `surface.thicken` |
 | SURFACE / CREATE | SURFACE / CREATE | `surface.boundary`, `surface.patch`, `surface.extrude`, `surface.revolve`, `surface.sweep`, `surface.loft`, `surface.offset`, `surface.midsurface`, `surface.ruled`, `surface.blend` |
 | SURFACE / INSPECT | INSPECT / SURFACE QUALITY | `inspect.continuity` |
-| SURFACE / MODIFY | SURFACE / EDIT | `surface.stitch`, `surface.extend`, `surface.trim`, `surface.untrim`, `surface.unstitch`, `surface.reverse_normal`, `surface.fair`, `surface.fillet`, `surface.match` |
+| SURFACE / MODIFY | SURFACE / EDIT | `surface.stitch`, `surface.extend`, `surface.trim`, `surface.untrim`, `surface.unstitch`, `surface.reverse_normal`, `surface.fair`, `surface.fillet`, `surface.chamfer`, `surface.match` |
 | WELDMENTS / CREATE | WELDMENTS / CREATE | `frame.member` |
 | WELDMENTS / MODIFY | WELDMENTS / MODIFY | `frame.trim` |
 
@@ -162,7 +162,7 @@ Additional handles: `ribbon:workspace`, `ribbon:search`, and `ribbon:section:<TA
 
 The workspace popup is 470 px wide, anchored below the workspace column. Design and Render keep their existing menu actions and enablement; planned workspaces cannot be selected. Each row also publishes `workspace:menu:<design|render|animation|simulation|manufacture|drawing>`. The constraint cells publish `ribbon:constraint:<command id>` alongside their existing `button:` and `toolbar:` handles. No icon assets or command ids were added.
 
-Section lists use 30 px command rows, 20 px semantic icons, monospace shortcuts, hover pins and a pinning footer. `workspace::groups` optionally supplies headings and command order. MODEL / MODIFY uses EDGES, FACES, BODIES and SPECIALISE; unlisted commands follow the final heading in their original order. This ordering does not change promoted buttons or saved pins.
+Section lists use 30 px command rows, 20 px semantic icons, monospace shortcuts, a ⋯ menu on each row (which pins and unpins) and a pinning footer. `workspace::groups` optionally supplies headings and command order. MODEL / MODIFY uses EDGES, FACES, BODIES and SPECIALISE; unlisted commands follow the final heading in their original order. This ordering does not change promoted buttons or saved pins.
 
 Ribbon tooltips show the full command name in bold and its registered shortcut in a key cap. Existing Render catalog descriptions are reused; commands without prose descriptions show the header alone (and their existing disabled reason when applicable). Registry parameter syntax is not presented as a description.
 

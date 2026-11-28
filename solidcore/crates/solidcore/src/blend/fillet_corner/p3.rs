@@ -333,9 +333,12 @@ pub struct FilletCorner {
     /// corner type, exact points and, until the patch takes it, the facet's face; set
     /// with [`Self::blend`] on a 3x3 chamfer corner that is the event.
     pub chamfer_corner: Option<crate::blend::blend_corner::chamfer::ChamferCorner>,
-    /// The chamfer event's configuration at a vertex of three but for chamfers of both
-    /// convexities (`ChamferClass::MixedConvexity`): as a bevel the corner is refused.
-    pub chamfer_mixed_convexity: bool,
+    /// The chamfer event's mitre of both convexities: the fillet geometries whose surfaces
+    /// end at a rail short of the mitre point, each with that point. Their surfaces are
+    /// continued to hold it once the rails are trimmed, before the faces are made
+    /// (`chamfer::continue_chamfer_surfaces`): the rails' trim reads them at the ends of
+    /// the surface's own parameter box.
+    pub chamfer_reach: Vec<(FilletGeomId, Point3)>,
     /// The fork's Setback's own members (`m_vSetBacks`, `m_lFillOrder`, `m_bConvexSetBack`,
     /// `m_bSetBackOverflows`, `m_pFill`; smlib#104, WR-697): set at its creation on a blend
     /// corner that is a Setback.
@@ -344,6 +347,10 @@ pub struct FilletCorner {
     /// faces' surfaces and loops; smlib#82, WR-697): set by its topology on a blend corner
     /// that is a Mixed one.
     pub mixed: Option<crate::blend::blend_corner::mixed::MixedCorner>,
+    /// Not the fork's (#19089): the support change's own members (its ring, its balls and,
+    /// until the patches take them, its two faces): set at its creation on a blend corner
+    /// that is one.
+    pub support_ball: Option<crate::blend::blend_corner::support_ball::SupportBall>,
     /// The fork's `m_pEndCap` (smlib 41a39ec, WR-697): an End at a smooth vertex's plane
     /// square to its edge there (`GetEndCapSurface`), set by its topology.
     pub end_cap: Option<Surface>,
@@ -358,6 +365,11 @@ pub struct FilletCorner {
     /// is looked for across the cliff's tangent seam as well. Set only on the second pass's corner
     /// at V, where the concave chain meets the cliff.
     pub roll_over: bool,
+    /// Not the fork's (tangency-labs/solidcraft#21940): a Join whose side seam on this face ends
+    /// inside the band the round takes off (`join::seams_short_of_rails`): the rails never cross
+    /// the seam, so the section's foot on this face keeps its name in the face's natural domain,
+    /// and the blend's rail ends on it are not renamed to the trim curve's side of the seam.
+    pub seam_short_of_rails: Option<FaceId>,
     /// Not upstream (#10876): the Roll-over's End across the cliff's tangent seam
     /// ([`crate::blend::blend_corner::rollover::seam_end`]), set by its topology: the end rib is
     /// two fillet edges, on the end face and on the wall, meeting at the seam, and the cap is
@@ -723,12 +735,14 @@ impl FilletCorner {
             swept: None,
             ball: None,
             chamfer_corner: None,
-            chamfer_mixed_convexity: false,
+            chamfer_reach: Vec::new(),
             setback: None,
             mixed: None,
+            support_ball: None,
             end_cap: None,
             turned_back_arcs: [None, None],
             roll_over: false,
+            seam_short_of_rails: None,
             seam_cap: None,
             end_face: None,
         }
@@ -1506,10 +1520,11 @@ impl FilletCorner {
         {
             return Ok(());
         }
-        // the fork's (41a39ec): an End at a smooth vertex's patch is its cap
+        // the fork's (41a39ec): an End at a smooth vertex's patch is its cap; so is a capped
+        // End's whose rail never reaches its side edge
         if self
             .blend
-            .is_some_and(|blend| blend.is_end() && blend.end == BlendEnd::AtSmooth)
+            .is_some_and(crate::blend::blend_corner::BlendCorner::has_end_cap)
         {
             let built = env.with_patch_env(|env| {
                 crate::blend::blend_corner::end::create_end_cap_patch(self, env)
@@ -2353,6 +2368,7 @@ impl FilletCorner {
                 || blend.is_end()
                 || blend.is_swept()
                 || blend.is_chamfer()
+                || blend.is_support_ball()
         }) {
             return Ok(());
         }
@@ -2792,6 +2808,118 @@ fn mixed_corner_rails_cross(
     Ok(ang.is_some_and(|a| rad_to_deg(a) < ang_tol_deg))
 }
 
+/// An endpoint tangent for the face-closing test: an unevaluable tangent cannot match,
+/// but cancellation stops the walk.
+fn face_closing_tangent(
+    evaluated: Result<crate::topology::edgeuse::p3::NormalizedEval>,
+) -> Result<Option<Vec3>> {
+    match evaluated {
+        Ok(e) => Ok(e
+            .first_deriv
+            .filter(|d| d.length_squared() > crate::math::EFF_ZERO * crate::math::EFF_ZERO)),
+        Err(e) if e.is_cancelled() => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Not upstream (#16404): whether a face around the vertex closes to a cusp between a blended
+/// edge and an edge of the other convexity not blended there: in some face's loop the two edges
+/// leave the vertex along one tangent, within `tangency_tol_radians` and in the same sense, so
+/// the face's corner angle between them is zero (a boss's concave base circle tangent to the
+/// convex rim of the face it stands on). The blend's contact line on that face is squeezed
+/// between the two edges, and past the other edge it would have to roll on the far side of the
+/// faces, which a blend cannot cross to (as a tangent chain does not run on into an edge of the
+/// other convexity): no blend of any size fits. Where both are convex or both concave the blend
+/// may run over the other edge, so that is not this case; nor are two edges that run on into
+/// each other (opposite senses), two uses of one edge, a pair neither blended, an edge not
+/// blended whose faces are tangent (no convexity), and a tangent that cannot be evaluated or is
+/// shorter than `SM_EFF_ZERO`.
+///
+/// A pair both blended and of one convexity closes the face to a cusp too: the two blends'
+/// contact lines on that face are each set back from their own edge, and between two edges
+/// leaving the vertex along one tangent the face has no width for either near it (a tangent
+/// chain from a hole's rim on to the bottom edge the hole wall touches, #1390). A pair both
+/// blended and of the two convexities is the mixed-convexity corner, with its own refusal.
+///
+/// Convexity is the blend's own ([`crate::blend::fillet_solver::p5::is_concave_edge`]). The walk
+/// is [`FilletCorner::create_noting_roll_overs`]': each step is one face's corner at the vertex,
+/// the edge use leaving it and its clockwise neighbour arriving at it. `solver_eus`: the
+/// blended edge uses at the vertex, the first leaving it.
+///
+/// # Errors
+///
+/// [`SolidError::InvalidInput`] for a walk that does not close or an edge use without a
+/// neighbour, radial partner or edge; [`SolidError::Cancelled`] from endpoint evaluation;
+/// those of the tangency and convexity tests.
+pub fn face_closes_to_a_point(
+    k: &Kernel,
+    b: &mut Brep,
+    solver_eus: &[EdgeuseId],
+    tangency_tol_radians: f64,
+) -> Result<bool> {
+    let Some(&start_eu) = solver_eus.first() else {
+        return Ok(false);
+    };
+    let tan_tol_deg = rad_to_deg(tangency_tol_radians);
+    let is_concave_edge = crate::blend::fillet_solver::p5::is_concave_edge;
+    let edge_of = |b: &Brep, eu: EdgeuseId| -> Result<EdgeId> {
+        eu1::edge(b, eu)?.ok_or_else(|| invalid(OP_CREATE, "edge use without edge"))
+    };
+    let blended = solver_eus
+        .iter()
+        .map(|&eu| edge_of(b, eu))
+        .collect::<Result<Vec<_>>>()?;
+    // the edge use's tangent at its start (`at` 0) or end (`at` 1), along its own sense
+    let tangent = |b: &Brep, eu: EdgeuseId, at: f64| -> Result<Option<Vec3>> {
+        face_closing_tangent(crate::topology::edgeuse::p3::normalized_evaluate_read_only(
+            k, b, eu, at, false, true,
+        ))
+    };
+    let mut eu = start_eu;
+    let mut steps = 0usize;
+    let max_steps = b.edgeuses().len();
+    loop {
+        steps += 1;
+        if steps > max_steps.saturating_add(1) {
+            return Err(invalid(OP_CREATE, "walk around the vertex does not close"));
+        }
+        let leaving = eu;
+        let arriving = eu1::cw_edgeuse(b, leaving)?
+            .ok_or_else(|| invalid(OP_CREATE, "edge use without clockwise neighbour"))?;
+        let (e0, e1) = (edge_of(b, leaving)?, edge_of(b, arriving)?);
+        let (blended0, blended1) = (blended.contains(&e0), blended.contains(&e1));
+        let both = blended0 && blended1;
+        if e0 != e1 && (blended0 || blended1) {
+            // both pointing away from the vertex
+            let cusp = match (tangent(b, leaving, 0.0)?, tangent(b, arriving, 1.0)?) {
+                (Some(d0), Some(d1)) => {
+                    ignored(d0.angle_between(-d1))?.is_some_and(|a| a < tangency_tol_radians)
+                }
+                _ => false,
+            };
+            let closes = if !cusp {
+                false
+            } else if both {
+                // two blended edges of one convexity; of two, the mixed corner
+                is_concave_edge(k, b, e0)? == is_concave_edge(k, b, e1)?
+            } else {
+                // the edge not blended there: a smooth one (its faces tangent) has no convexity
+                let other = if blended0 { arriving } else { leaving };
+                !eu2::is_tangent_sector(k, b, other, tan_tol_deg, false, false)?
+                    && is_concave_edge(k, b, e0)? != is_concave_edge(k, b, e1)?
+            };
+            if closes {
+                return Ok(true);
+            }
+        }
+        eu = eu1::radial(b, arriving)?
+            .ok_or_else(|| invalid(OP_CREATE, "edge use without radial partner"))?;
+        if eu == start_eu {
+            return Ok(false);
+        }
+    }
+}
+
 /// `sm_TestG1Continuity` (unit `blend.fillet_corner_p1`).
 fn test_g1_continuity(
     k: &Kernel,
@@ -2822,6 +2950,37 @@ fn check_nx1_degeneracy(k: &Kernel, b: &mut Brep, vertex: VertexId, eu: EdgeuseI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_closing_tangents_propagate_cancellation_only() {
+        use crate::topology::edgeuse::p3::NormalizedEval;
+
+        let cancelled = SolidError::Cancelled {
+            operation: "test::endpoint_tangent",
+        };
+        let error = face_closing_tangent(Err(cancelled.clone())).unwrap_err();
+        assert_eq!(error, cancelled);
+        for error in [
+            SolidError::invalid_input(OP_CREATE, "unevaluable endpoint"),
+            SolidError::Unsupported {
+                operation: OP_CREATE,
+                reason: "unsupported endpoint",
+            },
+        ] {
+            assert_eq!(face_closing_tangent(Err(error)).unwrap(), None);
+        }
+        for (tangent, expected) in [
+            (None, None),
+            (Some(Vec3::ZERO), None),
+            (Some(Vec3::X), Some(Vec3::X)),
+        ] {
+            let evaluated = NormalizedEval {
+                point: Point3::ZERO,
+                first_deriv: tangent,
+            };
+            assert_eq!(face_closing_tangent(Ok(evaluated)).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn filleted_edgeuses_other_than_two_are_typed_failures() {

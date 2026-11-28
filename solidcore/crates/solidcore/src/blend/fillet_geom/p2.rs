@@ -191,6 +191,7 @@
 //!   its odd derivatives (upstream negates all); only the first is read without an ease,
 //!   so the pinned results are unchanged.
 
+use crate::math::det;
 use std::borrow::Cow;
 
 use crate::blend::fillet_corner::p3::FilletCorner;
@@ -1296,6 +1297,15 @@ pub struct SrfSrfOptions {
     /// the chord `end - start`, which heads along a circle's arc only where it is shorter than
     /// a half turn, and upstream's span is then the right curve, also a longer arc.
     pub closed_by_start_direction: bool,
+    /// Not upstream (solidcore-native, with `closed_by_start_direction`): the heading tells
+    /// only the side the curve leaves its start on (a positive dot product with it), not its
+    /// tangent within the angle tolerance. The two ways round a closed curve leave the start in
+    /// opposite directions, so the side tells them apart, and a curve approximated to the
+    /// intersection's tolerance keeps it where its tangent may stray past that angle. A curve
+    /// cut at a closed surface's seam is joined across it as without a heading (#21416), and
+    /// kept only where the joined curve leaves on that side. For a caller whose heading is
+    /// exact but whose curve may be approximated (an End's cap edge, `calc_end_cap_edges`).
+    pub heading_side_only: bool,
 }
 
 /// One candidate curve of the selection loop.
@@ -1774,8 +1784,8 @@ fn continues_across(
         return Ok(false);
     }
     // the angle between the tangents, read high by its rounding
-    let between = t1.cross(t2).length().atan2(t1.dot(t2)) * (1.0 + gamma(8)) + gamma(8);
-    let turn = 2.0 * spread.asin() + ANG_TOL_RAD;
+    let between = det::atan2(t1.cross(t2).length(), t1.dot(t2)) * (1.0 + gamma(8)) + gamma(8);
+    let turn = 2.0 * det::asin(spread) + ANG_TOL_RAD;
     Ok(between.is_finite() && between <= turn)
 }
 
@@ -1976,7 +1986,11 @@ pub fn srf_srf_intersection_with_context(
         .filter(|_| opts.closed_by_start_direction)
         .map(|dir| Heading {
             dir,
-            cos_tol: angle_tol.cos(),
+            cos_tol: if opts.heading_side_only {
+                0.0
+            } else {
+                det::cos(angle_tol)
+            },
         });
 
     // surface and surf/surf intersection locals
@@ -2438,7 +2452,9 @@ pub fn srf_srf_intersection_with_context(
     // error: didn't find a curve within tol of endPoints
     if best_dist == NO_CURVE && best_len == NO_CURVE {
         // Not upstream (#21416): one curve the intersectors cut at a closed surface's seam
-        if let (Some(start_pnt), Some(end_pnt), None) = (start, end, wanted_heading) {
+        // (with a heading only by its side, and kept where the joined curve leaves on it)
+        let pairs = wanted_heading.is_none() || opts.heading_side_only;
+        if let (Some(start_pnt), Some(end_pnt), true) = (start, end, pairs) {
             // (a failure of the pairing leaves the search empty, as it was)
             if let Some(across) = ignore_status(candidates_across_seam(
                 k,
@@ -2450,7 +2466,15 @@ pub fn srf_srf_intersection_with_context(
             ))?
             .flatten()
             {
-                return Ok(across);
+                let headed = match (wanted_heading, across.curve_3d.as_ref()) {
+                    (Some(h), Some(c)) => leaves_along(k, c, h)?,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                };
+                if headed {
+                    return Ok(across);
+                }
+                headed_away = true;
             }
         }
         // Not upstream: a curve through the points that heads away from the wanted heading is
@@ -4081,6 +4105,7 @@ impl FilletBrep {
         let cp_vertex = owner
             .filleted_vertex()
             .ok_or_else(|| missing_set_up(OP, FilletSetUp::CornerVertex))?;
+        let seam_face = owner.seam_short_of_rails;
 
         let geoms = self.vertex_fillet_geoms(v)?;
         if geoms.is_empty() {
@@ -4130,9 +4155,12 @@ impl FilletBrep {
 
             // the ball's feet at the vertex, on each of the blend's faces
             let mut uvs = [Point2::new(0.0, 0.0); 2];
+            // (#21940) the solver's rail on the face whose seam ends inside the band
+            let mut seam_rail = None;
             for (ii, slot) in uvs.iter_mut().enumerate() {
                 let fs = solvers.solver(sid)?;
                 let side_eu = solver_edgeuse(fs, ii, OP)?;
+                let on_seam_face = seam_face.is_some() && eu1::face(target, side_eu)? == seam_face;
                 let offset = solver_surface(fs, ii, OP)?;
                 let distance = offset.offset_distance().abs();
                 let base = offset.base_surface().clone();
@@ -4220,6 +4248,25 @@ impl FilletBrep {
                     dropped.result_uv,
                     b.uv,
                 )?;
+                // Not the fork's (tangency-labs/solidcraft#21940): at a Join whose side seam ends
+                // inside the band (`FilletCorner::seam_short_of_rails`, this foot's face: a
+                // sphere turned so that its seam runs from a closed rim's vertex into the face,
+                // ending at a pole short of the rails), the rails never cross the seam, and the
+                // name nearest the edge use's parameters, on the seam's other side, lies past the
+                // domain's end: the foot's name in the domain is taken (the same point of the
+                // surface, moved by whole periods only). Where the rails do cross the seam at
+                // the vertex, the name on the edge use's side stays, as above.
+                if on_seam_face {
+                    seam_rail = Some(ii);
+                }
+                let foot = if on_seam_face
+                    && !domain.contains_point(foot, 0.0)
+                    && domain.contains_point(dropped.result_uv, 0.0)
+                {
+                    dropped.result_uv
+                } else {
+                    foot
+                };
                 *slot = foot;
             }
 
@@ -4232,6 +4279,14 @@ impl FilletBrep {
                 domain1.add_point(uv0);
                 domain2.add_point(uv1);
             }
+            // (#21940) the blend's rails never cross the seam that ends inside the band: its rail
+            // ends' feet on that face keep their names in the domain (`c1_collect_points`). Set
+            // each time the section is solved, so a corner rebuilt without such a seam (another
+            // size, another pass) names them as upstream again.
+            solvers.solver_ops_mut(sid)?.solver_mut().rail_end_names = match seam_rail {
+                Some(rail) => crate::blend::fillet_solver::p1::RailEndNames::InDomain { rail },
+                None => crate::blend::fillet_solver::p1::RailEndNames::TrimCurveSide,
+            };
             let (found, tsect) = point_on_plane_solve(
                 k,
                 solvers.solver_ops_mut(sid)?,
@@ -5185,8 +5240,8 @@ mod tests {
         let t = seam_deg.to_radians();
         let frame = Axis2Placement::new(
             Point3::new(0.0, 0.0, 0.0),
-            Vec3::new(t.cos(), t.sin(), 0.0),
-            Vec3::new(-t.sin(), t.cos(), 0.0),
+            Vec3::new(det::cos(t), det::sin(t), 0.0),
+            Vec3::new(-det::sin(t), det::cos(t), 0.0),
         );
         let mut cylinder = Cone::create_canonical_cylinder(k, &frame, 10.0).unwrap();
         let mut domain = Extent2d::default();
@@ -5410,7 +5465,7 @@ mod tests {
     /// The point at `deg` degrees on the cylinder's circle at height 5.
     fn on_circle(deg: f64) -> Point3 {
         let t = deg.to_radians();
-        Point3::new(10.0 * t.cos(), 10.0 * t.sin(), 5.0)
+        Point3::new(10.0 * det::cos(t), 10.0 * det::sin(t), 5.0)
     }
 
     /// A curve through a closed candidate's closure may go without a UV curve only on a
@@ -5426,7 +5481,7 @@ mod tests {
         // on the seam, and within the tolerance of it
         assert!(on_closed_seam(&k, &cylinder, &domain, Some(on_circle(5.0)), tol).unwrap());
         let t = 5.0_f64.to_radians();
-        let near = on_circle(5.0) + Vec3::new(t.cos(), t.sin(), 0.0) * (0.5 * tol);
+        let near = on_circle(5.0) + Vec3::new(det::cos(t), det::sin(t), 0.0) * (0.5 * tol);
         assert!(on_closed_seam(&k, &cylinder, &domain, Some(near), tol).unwrap());
         // beside it (10 degrees off and more, and 1e-3 along the circle) and no closure at all
         for deg in [15.0, -5.0, 180.0, 5.0 + 1e-4_f64.to_degrees()] {
@@ -5849,7 +5904,7 @@ mod tests {
 
     fn on_branch(sign: f64, deg: f64) -> Point3 {
         let s = deg.to_radians();
-        Point3::new(s.cos(), sign * s.cos(), s.sin())
+        Point3::new(det::cos(s), sign * det::cos(s), det::sin(s))
     }
 
     /// #21416 review: two candidates that meet on a closed surface's seam are joined only where
