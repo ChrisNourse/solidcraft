@@ -1379,6 +1379,47 @@ fn combine_of_a_piece_a_cut_used_to_split_off_takes_the_body_it_is_part_of() {
     }
 }
 
+/// A circular pattern of cylinder `T` (radius 0.5, beside cylinder `M`) of six makes copies `T (2)`
+/// … `T (6)`. Combine joins copies that are there. A copy the pattern no longer makes (its count was
+/// lowered) is skipped with a warning that says so, when the seed `T` is listed beside it, so the
+/// design still rebuilds; listed without its seed it is an unknown body.
+#[test]
+fn combine_skips_a_missing_numbered_copy_with_a_truthful_warning() {
+    let setup = || {
+        let mut s = Session::default();
+        s.execute("solid.cylinder", &json!({"radius": 0.5, "height": 1, "base": [0, 0, 0], "body_name": "M"})).unwrap();
+        s.execute("solid.cylinder", &json!({"radius": 0.5, "height": 1, "base": [0.4, 0, 0], "operation": "new", "body_name": "T"})).unwrap();
+        s.execute("solid.pattern.circular", &json!({"bodies": ["T"], "axis": "Z", "count": 6})).unwrap();
+        s
+    };
+    let join = |s: &mut Session, tools: Value| s.execute("solid.combine", &json!({"target": "M", "tools": tools, "operation": "join"}));
+    let last_warning = |s: &Session| s.model.results.last().and_then(|r| r.warning.clone()).unwrap_or_default();
+
+    let mut s = setup();
+    join(&mut s, json!(["T (2)", "T (6)"])).unwrap();
+    assert!(!last_warning(&s).contains("not there any more"), "{}", last_warning(&s));
+
+    // Seed listed, copies gone: builds, and the warning does not claim they are part of `T`.
+    let mut s = setup();
+    join(&mut s, json!(["T", "T (7)", "T (9)"])).unwrap();
+    let w = last_warning(&s);
+    assert!(w.contains("`T (7)` is not there any more; skipped"), "{w}");
+    assert!(w.contains("`T (9)` is not there any more; skipped"), "{w}");
+    assert!(!w.contains("is part of"), "{w}");
+
+    // Copies that exist are joined while the missing ones are skipped.
+    let mut s = setup();
+    join(&mut s, json!(["T", "T (2)", "T (9)"])).unwrap();
+    let w = last_warning(&s);
+    assert!(w.contains("`T (9)` is not there any more; skipped"), "{w}");
+
+    // No seed in the list: an unknown body, as before.
+    for tools in [json!(["T (9)"]), json!(["T (2)", "T (7)"])] {
+        let r = join(&mut setup(), tools);
+        assert!(r.as_ref().is_err_and(|e| e.to_string().contains("unknown body")), "{r:?}");
+    }
+}
+
 /// A triangular prism and a thin slab sharing their bottom plane, the prism's edge in that plane
 /// lying in the slab's end face, the slab's corners rounded nearly to half its width (so its flat
 /// end is narrower than the prism).
@@ -2234,6 +2275,26 @@ fn fins_meeting_at_the_axis_join_into_their_hub() {
     // overlaps.
     let v = volume(&s, "Body1");
     assert!((v - 4624.24).abs() < 0.05, "{v}");
+}
+
+/// #22146, second case: Pipe1, a 5 mm pipe along lines and arcs, and Pipe2 joined to it. Each pipe
+/// builds alone with its volume (Pappus), and the join must give one valid body of both volumes:
+/// the pipes touch without overlapping. The join failed SMLib's check on a torus face of Pipe1 read
+/// back through the flat arrays ("SmSurfOfRevolution::Test #3 Midpoint").
+#[test]
+fn a_pipe_joined_to_a_pipe_of_lines_and_arcs_builds_one_body_of_both_volumes() {
+    let s = replay(include_str!("../../../examples/regressions/pipe_join_second_case.json"));
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+    let state = s.model.state();
+    let names: Vec<&str> = state.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["Body1"], "Pipe2 joins Pipe1's body");
+    let body = &state.body("Body1").unwrap().body;
+    assert_eq!(body.shell_count(), 1);
+    assert!(body.validity().is_empty(), "{:?}", body.validity());
+    // Pipe1 10170.259935237927 and Pipe2 1002.8772940460799 mm^3, touching
+    let want = 11173.137229284;
+    let v = volume(&s, "Body1");
+    assert!((v - want).abs() <= 1e-9 * want, "volume {v}, the two pipes' {want}");
 }
 
 /// #17004: a body whose 2 mm round has two pieces swept 0.45 degrees (plane-to-cone rounds kept as
