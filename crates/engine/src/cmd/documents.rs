@@ -47,6 +47,9 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 /// `p` as the contract type `P`; no parameters at all (`null`) is the empty object.
 fn parse<P: DeserializeOwned>(cmd: &str, p: &Value) -> Result<P> {
+    if !p.is_null() && !p.is_object() {
+        return Err(bad(cmd, "parameters must be a JSON object"));
+    }
     let p = if p.is_null() { Value::Object(Default::default()) } else { p.clone() };
     serde_json::from_value(p).map_err(|e| bad(cmd, e.to_string()))
 }
