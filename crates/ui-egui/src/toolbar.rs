@@ -1733,7 +1733,7 @@ impl RibbonPanels {
                         let checked =
                             (persistent_available(app, c.id) && app.preferences.persistent_ribbon_pressed).then(|| persistent_pressed(app, c.id));
                         let mut item = ui_kit::Item::action(c.id, info.label, info.icon)
-                            .key(&crate::keymap::display_for(app, c.id).unwrap_or_default())
+                            .key(&crate::keymap::display_starting(app, c.id).unwrap_or_default())
                             .on_if(can_start(app, c));
                         item.checked = checked;
                         item.tip = persistent_hint(app, c, info.enabled);
@@ -2469,7 +2469,7 @@ impl RowData {
         } else {
             dropdown_checkable(app, c.id).then(|| persistent_pressed(app, c.id))
         };
-        let shortcut = crate::keymap::display_for(app, c.id).unwrap_or_default();
+        let shortcut = crate::keymap::display_starting(app, c.id).unwrap_or_default();
         // A disabled row says why; a documented command also shows its help (#2758).
         let reason = if crate::drawing_workspace::active(app) && c.planned.is_some() {
             coming_soon(app, c).then(|| app.tr("ui.drawing_ribbon.planned"))
