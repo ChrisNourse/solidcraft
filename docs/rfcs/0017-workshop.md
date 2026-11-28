@@ -9,9 +9,9 @@
 | Extends | [RFC 0002](0002-plugins.md) (plugins; this RFC is its phase 6, "curated, signed index") |
 | Related | [RFC 0015](0015-plugin-ui-workspaces.md) (plugin UI), [#20425](https://github.com/tangency-labs/solidcraft/pull/20425) (`min_host_version` and `optional_capabilities`), [#5586](https://github.com/tangency-labs/solidcraft/pull/5586) (install from a GitHub link), [#7558](https://github.com/tangency-labs/solidcraft/issues/7558) (extras and accessory packs: what users want), [RFC 0018 / #22338](https://github.com/tangency-labs/solidcraft/pull/22338) (Send to App; the same `solidcraft://` link handler) |
 
-The **Workshop** is a website, <https://workshop.solidcraft.io>, like Printables but for SolidCraft models and plugins. People publish there. The site is the index the app reads, and the review and the trust tiers live there. The index and its signing are ours (`tangency-labs`). The app's Workshop browser is a client of the site, and so is the "Open in SolidCraft" button on every model and plugin page. Custom, a repository the user adds by hand in the app, stays as its own tier.
+The **Workshop** is a community site for sharing SolidCraft models and plugins at <https://workshop.solidcraft.io>: an image grid with 3D previews. People publish there. The site is the index the app reads, and the review and the trust tiers live there. The index and its signing are ours (`tangency-labs`). The app's Workshop browser is a client of the site, and so is the "Open in SolidCraft" button on every model and plugin page. Custom is the "not in the Workshop" banner for a repository the user adds by hand in the app.
 
-People should be able to find a plugin, a part generator, a theme or a model on the Workshop, read who made it and what it may do, and open it in SolidCraft in a few clicks, without us shipping every one of them and without us pretending to have vetted code we have not. This RFC says how, in four trust tiers (Official, Community, Unverified and Custom), on top of the sandbox, permissions and approval screen RFC 0002 already built. The site comes first. The in-app side has no rush until the site exists, and the phases say so (section 14).
+People should be able to find a plugin, a part generator, a theme or a model on the Workshop, read who made it and what it may do, and open it in SolidCraft in a few clicks, without us shipping every one of them and without us pretending to have vetted code we have not. This RFC says how, with three trust badges (Official, Community and Unverified) and a Custom banner for user-added repositories, on top of the sandbox, permissions and approval screen RFC 0002 already built. The site comes first. The in-app side has no rush until the site exists, and the phases say so (section 14).
 
 Today there is a plugin runtime, an install flow from a `.zip`, a "Update to x.y.z" check against a plugin's own GitHub releases, and Preferences > Plugins to enable, disable and remove. There is no place to discover anything, no signing, no list of who is trusted, and no way to pull a bad plugin back.
 
@@ -22,7 +22,7 @@ Today there is a plugin runtime, an install flow from a `.zip`, a "Update to x.y
 These are proposed here and are open for comment until the RFC is accepted.
 
 1. **Three kinds of installable:** plugins, generators and themes (section 2). Each is a package with one manifest. What a package may contain decides its kind; there is no second packaging format. More kinds (materials, sample designs, templates, tables) come later, each as its own kind.
-2. **Four trust tiers, the same four words on the site and in the app:** Official (the project's own), Community (reviewed and signed), Unverified (listed, checked by machine only, not reviewed) and Custom (any GitHub `owner/repo` or URL the user adds in the app) (section 3). The user always sees which tier an item is in.
+2. **Three badges, the same on the site and in the app:** Official (the project's own), Community (reviewed and signed) and Unverified (listed, checked by machine only, not reviewed). Custom is not a badge; it is the "not in the Workshop" banner for a repository the user adds in the app (section 3).
 3. **The Workshop site is the index.** People publish on the site, review and verification live there, and the site's data is built into one signed snapshot that the app reads. We own the index and the signing key (`tangency-labs`). The app never sends the site anything that identifies the user (section 4).
 3a. **Models are not a fourth kind.** A model is a design: it is opened, not installed, and runs no code. The site has a separate publish and download flow for models, beside the three installable kinds (section 2.4).
 4. **Plugin, generator and theme packages stay on GitHub Releases** in the author's own repository, as RFC 0002 section 5 already prefers. The Workshop points at them and pins their hashes. The site hosts listing pages, pictures, the signed index and model files; it does not host packages in v1.
@@ -37,7 +37,8 @@ These are proposed here and are open for comment until the RFC is accepted.
 ## 1. Goals and non-goals
 
 **Goals**
-- A website where people publish, browse and review SolidCraft work, and an in-app Workshop that reads the same index.
+- A community-first website where people share SolidCraft work, with author profiles, likes, comments and "makes" on model and plugin pages, featured, trending and new lists, and categories in the MVP. The in-app Workshop reads the same index.
+- Browsing, opening and installing need no account. Browsing needs no cookies. Publishing, liking, commenting and posting a make need a site sign-in with GitHub.
 - Browse, search, install, update and remove community work from inside SolidCraft, on desktop first, after the site exists.
 - Let a person who does not know what a WebAssembly sandbox is tell a reviewed item from an unreviewed one at a glance.
 - Let an author publish on the site by naming their repository (or uploading a model), with automated checks that tell them what to fix.
@@ -48,12 +49,11 @@ These are proposed here and are open for comment until the RFC is accepted.
 - No payments, licence keys, paid listings or advertising. A free Workshop only.
 - Not a replacement for core features. If many people need something, it belongs in SolidCraft itself.
 - Not hosting packages. The site stores listing pages, pictures, the index and model files, and serves authors' packages from their own GitHub Releases in v1 (the web build is the one question, section 11).
-- Not a social network. People who browse, open or install need no account and no cookies. Publishers sign in with their GitHub account on the site, and that is the only account. No comments or follower counts in v1.
-- No native executables, no separate processes and no containers. Home Assistant's add-ons, which run as separate programs beside the host, are the part of that model we deliberately leave out: a SolidCraft installable is sandboxed WebAssembly or data, and nothing else.
+- No native executables, no separate processes and no containers. A SolidCraft installable is sandboxed WebAssembly or data, and nothing else.
 
 ## 2. The three kinds
 
-We took Home Assistant's split as the model: code that runs inside the host and is described by a manifest the host reads before loading any code (its integrations); heavier things that run beside the host (its add-ons), which we do not copy; and the community content that a store such as HACS also carries, which is data and configuration (themes, templates, dashboard parts). SolidCraft starts with three kinds, plugins, generators and themes:
+SolidCraft starts with three kinds: plugins, generators and themes. Code runs inside the host as sandboxed WebAssembly, with a manifest the host reads before loading it. Themes contain data only. No installable runs as a separate program beside the host:
 
 | Kind | What it is | Runs code | Exists today |
 |---|---|---|---|
@@ -121,22 +121,24 @@ The page shows one badge: **Checked** (the automatic check), **Reviewed** (plus 
 
 ### 2.4 Models: a separate publish and download flow
 
-The site also hosts **models**, which are designs people share, the way Printables hosts printable models. We decide that **a model is not a fourth kind of installable.** The reasons:
+The site also hosts **models**, which are designs people share with pictures, 3D previews and download links. We decide that **a model is not a fourth kind of installable.** The reasons:
 - An installable is installed: it is stored, approved, enabled, updated and removed, and it adds commands, importers, generators or appearance to SolidCraft. A model is opened: it becomes a new unsaved design, and then it is the user's file.
 - A model runs no code and asks for no permission. The approval screen, `package_hash`, the update check and revocation-by-hash do not apply to it, and putting it through them would only add words to the screen.
 - A model has different parts to its page: pictures, a description, the files, a licence, and the printing and use notes people want from a model site.
 
-So the site has a **publish a design** flow (the publisher uploads a `.sc` file or a STEP file with pictures and a licence) and a **download or open** flow. A model page has **Open in SolidCraft** (section 13.1) and a plain download. A model gets the same four tiers' words where they apply (an Official sample, a Community model whose licence and attribution were checked, an Unverified one that passed the machine checks), the same clean-room and licence rules (section 12), the same reports and delisting, and its file is checked as hostile input like any file the app opens. What the app shows before opening a model: its name, author, tier, licence and size, and it asks before it opens. A model never installs anything and never runs a plugin by being opened.
+So the site has a **publish a design** flow (the publisher uploads a `.sc` file or a STEP file with pictures and a licence) and a **download or open** flow. A model page has **Open in SolidCraft** (section 13.1) and a plain download. A model gets the same three badges where they apply (an Official sample, a Community model whose licence and attribution were checked, an Unverified one that passed the machine checks), the same clean-room and licence rules (section 12), the same reports and delisting, and its file is checked as hostile input like any file the app opens. What the app shows before opening a model: its name, author, tier, licence and size, and it asks before it opens. A model never installs anything and never runs a plugin by being opened.
 
 The built-in samples on Start (under Samples) are models too. The "Get more in the Workshop" row under them opens model pages.
 
 ## 3. The three tiers
 
-| | **Official** | **Community** | **Unverified** | **Custom** |
+Official, Community and Unverified are the same three badges on the site and in the app; Custom is only the "not in the Workshop" banner for a repository the user added in the app.
+
+| | **Official** | **Community** | **Unverified** | **Custom (banner only)** |
 |---|---|---|---|---|
 | How it gets there | The project publishes it from its own account | A person on the review team reads the source and the permissions, then admits it to the index, signed | The author publishes it on the Workshop site; automated checks pass; it is listed without a code review | The user types `owner/repo`, a GitHub URL or `owner/repo@tag` in the app |
 | Who we are vouching for | The code, as the project's own work | The code and the publisher | Only that the listing is well formed and meets the rules in section 12 | Nothing |
-| Shown as | Official badge | Community badge, publisher name | Unverified label ("not reviewed") | "Not in the Workshop, not reviewed" banner, in a different colour |
+| Shown as | Official badge | Community badge, publisher name | Unverified badge ("not reviewed") | "Not in the Workshop, not reviewed" banner, in a different color |
 | In search | Yes, ranked first | Yes, next | Yes, below Community | No (the user already knows what they want) |
 | Sandbox | The standard sandbox | The same | The same | The same |
 | Permissions on the approval screen | As requested | As requested | As requested, with the extra care in section 6 | As requested, with the extra care in section 6 |
@@ -147,11 +149,11 @@ The built-in samples on Start (under Samples) are models too. The "Get more in t
 
 **Official.** The project's own plugins, generators and themes, published from the project's account, reviewed by a second maintainer as any change is, and signed with the same key as the index. Anything else we ship through the Workshop is Official too. Official items are not a separate mechanism; they are Community items that are ours.
 
-**Community.** The review reads the source and the component's build (section 7), the manifest's permissions against what the code needs, and the clean-room checks (section 12). A "trusted developer" is a GitHub account or organization on the index's developers list, added after at least one reviewed plugin and an agreement to the publisher rules. Every Community release is reviewed: the badge means this release was read, not only that its publisher is trusted. A trusted developer gets a faster review (a maintainer reads the diff against the last reviewed release, not the whole source) and a first listing still gets the full one. Until a new release is reviewed, the previous reviewed release stays the one offered, and the new one shows as an update that is not yet reviewed. This is the HACS idea of a default list that maintainers curate, with the Home Assistant idea that custom integrations are not supported by the project, turned into an explicit label.
+**Community.** The review reads the source and the component's build (section 7), the manifest's permissions against what the code needs, and the clean-room checks (section 12). A "trusted developer" is a GitHub account or organization on the index's developers list, added after at least one reviewed plugin and an agreement to the publisher rules. Every Community release is reviewed: the badge means this release was read, not only that its publisher is trusted. A trusted developer gets a faster review (a maintainer reads the diff against the last reviewed release, not the whole source) and a first listing still gets the full one. Until a new release is reviewed, the previous reviewed release stays the one offered, and the new one shows as an update that is not yet reviewed.
 
 **Unverified.** The name is honest: the Workshop lists it, we have not vetted it. Automated checks cover the manifest, version rules, licence, attribution, sizes, a built component that matches the listing, and a scan of the package for banned content (section 12). They cannot prove behaviour.
 
-**Custom.** The user adds a source, as HACS lets a person add a custom repository. We accept GitHub only in v1 (`owner/repo`, `owner/repo@tag`, or an `https://github.com/owner/repo` URL), because the release API gives us a digest to check (section 7). Custom is the user-added tier: the item never went through the Workshop. Other hosts need a reason to trust their digests and are left to a later proposal; a `.zip` from anywhere still installs from a file. The same install checks, the same approval, and a clear banner. The app never lists a Custom source in search. The user's added sources are kept in the Workshop page and can be removed.
+**Custom.** The user adds a repository as a source in the app. We accept GitHub only in v1 (`owner/repo`, `owner/repo@tag`, or an `https://github.com/owner/repo` URL), because the release API gives us a digest to check (section 7). Custom is a banner, not a badge: the item never went through the Workshop. Other hosts need a reason to trust their digests and are left to a later proposal; a `.zip` from anywhere still installs from a file. The same install checks, the same approval, and a clear banner. The app never lists a Custom source in search. The user's added sources are kept in the Workshop page and can be removed.
 
 ## 4. The Workshop site, the index and the listing
 
@@ -221,7 +223,7 @@ Every release the build sees is re-checked on every run, so a release whose dige
 
 **`capabilities` and `optional_capabilities`.** Required capabilities must be served by this host, or the package is refused before any code runs. Optional ones are granted when supported and the plugin must provide a fallback. The index records both lists for every release, as `name@major.minor`.
 
-**Choosing the version.** For an item with several releases, the Workshop offers the newest release that this SolidCraft can run: `min_host_version` is not newer than the host, every required capability is served, and the release is not revoked. If the newest release needs a newer SolidCraft, the item page says so ("version 2.1 needs SolidCraft 0.54; version 2.0 is offered"), the way HACS lets a person install an older version when Home Assistant is too old for the latest. The installer re-checks on download and never trusts the index's reading of compatibility, because the host's own check is the authoritative one.
+**Choosing the version.** For an item with several releases, the Workshop offers the newest release that this SolidCraft can run: `min_host_version` is not newer than the host, every required capability is served, and the release is not revoked. If the newest release needs a newer SolidCraft, the item page says so ("version 2.1 needs SolidCraft 0.54; version 2.0 is offered"). The installer re-checks on download and never trusts the index's reading of compatibility, because the host's own check is the authoritative one.
 
 **Version rules.** Package versions are strict `major.minor.patch`, as the update check already requires. A pre-release is never offered unless the user turns on "show pre-releases" for that one item. A listed version cannot be reused with different contents: the index pins the hash of each version, and a hash mismatch is a revocation reason, not an update.
 
@@ -278,15 +280,15 @@ What the Workshop adds:
 - **Rollback.** The previous version is kept until the next update, so "Restore previous version" works offline. It is the same package and the same approval hash, so nothing new runs.
 - **Themes** update the same way. A package that adds a theme and a plugin updates as one package.
 
-## 9. Ratings and reports
+## 9. Community features and reports
 
-**v1 does not collect ratings.** We do not run accounts, and a star count we cannot defend (fake votes, review brigades) would be worse than none. Instead the item page shows facts the index build already has: the publisher, the licence, the date of the last release, how many releases, the compatible host versions, the repository's open-issue count and star count as reported by GitHub on the day the snapshot was built (labelled as GitHub's, with that date), and whether the item is Community.
+**Community features are in the MVP.** Model and plugin pages have author profiles, likes, comments and "makes": pictures and notes from people who used the work. We offer featured, trending and new lists, plus categories. Browsing, opening and installing need no account. Publishing, liking, commenting and posting a make need a site sign-in with GitHub. Likes show community interest, not a code review or a trust badge.
+
+The item page also shows facts the index build already has: the publisher, the license, the date of the last release, how many releases, the compatible host versions, the repository's open-issue count and star count as reported by GitHub on the day the snapshot was built (labeled as GitHub's, with that date), and whether the item is Community.
 
 **Reports.** Every item page has **Report a problem**. It opens, in the user's browser, a pre-filled GitHub issue form on the index repository with the item id, version and category, and nothing else from the app (no design, no path, no machine details unless the user adds them). Categories: it does not work, it behaves badly, it asks for too much, licence or clean-room concern, security. A security category points to a private way to report (GitHub's private vulnerability reporting on the index repository) rather than a public issue. The app sends nothing itself; the user's browser does.
 
 **Handling.** The maintainers triage reports. A licence, clean-room or security report can lead to delisting or revocation (section 9.1). A report about behaviour goes to the author's repository. Reports that name an author are answered in public on the issue.
-
-**Later.** Ratings may come back as "works for me" counts if we find a way to count one person once without accounts. That is not a promise.
 
 ### 9.1 Delisting and revocation
 
@@ -301,6 +303,14 @@ Two actions, kept apart, because one hides and the other stops.
 - Revoking a package never deletes the user's designs, the data a plugin saved in them, or the plugin's package folder. Removing the package stays the user's choice.
 - Offline: the cached revocation list applies. Past a set age (30 days, to be confirmed) the app shows a notice that it could not check, and never silently pretends the list is current.
 - The reasons for each delisting and revocation are recorded in the index repository's history, in public.
+
+### 9.2 Moderation and abuse handling
+
+Comments and makes have a report button for spam, harassment, unsafe content and license or clean-room concerns. We hide reported content pending review. Maintainers and moderators appointed by them review reports; authors cannot remove criticism from their own pages. We rate limit new accounts' likes, comments and makes to reduce spam and coordinated abuse.
+
+We remove content that breaks the site rules and restrict accounts that repeatedly abuse them. We tell the author why and provide a private appeal to the maintainers, reviewed by someone other than the original moderator. We log the account, content and report ids, timestamps, the reason, the moderator's action and the appeal outcome. Reports and moderation records stay private; public removal notices give the reason without exposing the reporter. Removing a comment or make does not revoke a package. Concerns about the item itself go through delisting or revocation (section 9.1).
+
+**Privacy.** Browsing needs no cookies and has no tracking. Sign-in uses a session cookie for publishing and community actions. We store profiles, likes, comments and makes with the signed-in account, and the moderation records described above. These site actions are separate from the app's index read, which sends no identifiers and no usage counts (section 10).
 
 ## 10. Offline use
 
@@ -370,7 +380,7 @@ The Workshop page's own settings (index source, "show pre-releases for this item
 
 ### 13.1 The "Open in SolidCraft" button
 
-Every model and plugin page on the Workshop has an **Open in SolidCraft** button, and a repository's README can show the same button. It opens the item in SolidCraft, which shows what it is and asks before it opens or installs anything. We took the idea from the "open your instance" badge that Home Assistant's own link service offers: a badge links to a static web page that hands the visitor to their own installation. Only the idea is used here.
+Every model and plugin page on the Workshop has an **Open in SolidCraft** button, and a repository's README can show the same button. It opens the item in SolidCraft, which shows what it is and asks before it opens or installs anything. A README badge links to a static web page that lets the visitor open the item in their own installation.
 
 **The badge.** The project hosts one badge image, original artwork with a row in ATTRIBUTION.md, as a static file. The author copies one line of Markdown into their README:
 
@@ -436,12 +446,12 @@ The site comes first. The in-app Workshop is a client of it, and there is no rus
 | Phase | Delivers |
 |---|---|
 | 0 | The shared crate `craft-workshop`: index and listing types and schema, signature verification, snapshot rules (sequence, expiry), the compatibility chooser, tests with fixed snapshots, and `solidcraft-cli workshop check <dir>` for authors. The index repository, empty. |
-| 1 | **The site, `workshop.solidcraft.io`:** browsable pages for plugins, generators, themes and models, the GitHub sign-in for publishers, the publish flow and its automated checks (section 4.3), the signed index and its signing process (key held offline), the review queue and the tiers, reports, delisting and revocation, and the badge and install pages (section 13.1). Static for readers, no cookies and no tracking. |
+| 1 | **The site, `workshop.solidcraft.io`:** browsable pages for plugins, generators, themes and models, author profiles, likes, comments and makes on model and plugin pages, featured, trending and new lists, categories, moderation (section 9.2), GitHub sign-in for publishing and community actions, the publish flow and its automated checks (section 4.3), the signed index and its signing process (key held offline), the review queue and the tiers, reports, delisting and revocation, and the badge and install pages (section 13.1). Browsing needs no account or cookies and has no tracking. |
 | 2 | **The handler and the in-app Workshop on desktop:** the shared `solidcraft://` handler with RFC 0018, the "Open in SolidCraft" flow, the Workshop rail entry and browse, item and installed pages, install with tier headers and the second step for high-risk grants, index-based update checks, revocation applied at start and daily, `workshop.*` commands. Themes first, then plugins. |
 | 3 | Models in the app: open a model from the site, "Get more in the Workshop" under Samples. |
 | 4 | Part generators: the `generators` declaration, `generator.find`, the insert-by-code form, design records and fallbacks. Index checks for `sources`. |
 | 5 | Web build: browse, then themes from the site, then plugins and generators with RFC 0002 phase 5. |
-| 6 | Later kinds (`materials`, `samples`, `templates`, `tables`, each its own small RFC), and whatever people ask for: ratings, in-app attestation checks, a catalog-only generator, an automatic-update choice. |
+| 6 | Later kinds (`materials`, `samples`, `templates`, `tables`, each its own small RFC), and whatever people ask for: in-app attestation checks, a catalog-only generator, an automatic-update choice. |
 
 Each phase is one topic and one PR or one group of PRs, per the project's rules. A phase is done when its tests pass, the screenshots (English and German, landscape) are in the PR, and, for phases 0 and 1, the schema, the signing choices and the review process were reviewed in the PR the way RFC 0002 reviews its phase 1.
 
@@ -457,7 +467,6 @@ Two questions are for the maintainers:
 - **Where it goes.** The Start page's left area under Samples, as found on main: the rail on the left gets a Workshop entry, and the area under the Samples block gets a "Get more in the Workshop" row (section 13). If a newer left sidebar replaces the Start page rail, the same two places move with it.
 - **MPL-2.0** is allowed for Unverified and Custom items, and never inside SolidCraft itself.
 - **Vendor data.** Dimensions and ordering codes from public datasheets are usable facts. Vendor CAD files and logos are not (section 12).
-- **Ratings** are facts only in v1 (section 9).
+- **Community features** are in the MVP, with site sign-in for publishing, likes, comments and makes (section 9).
 - **Per-author signing keys** come later. v1 identifies trusted developers by their GitHub account or organization (section 7).
-- **The Home Assistant mapping** is as in section 2: integrations are plugins, community content is themes (and later kinds), add-ons are not copied.
 - **Also decided here, open to comment:** build attestations are recorded and checked in the index build and in review, not inside the app, in v1; Custom is GitHub only in v1; the "could not check" notice for a stale revocation list appears after 30 days; the high-risk grants in section 6 start with folder writes, the `file` group, settings, other plugins and raised limits; the capability names and formats of the later kinds are placeholders for their own proposals.
